@@ -17,13 +17,12 @@ This Python program provides a comprehensive solution for extracting, analyzing,
 ## Usage
 1. Clone the repository.
 
-`git clone https://github.com/labcif/ADBExtractorAndAnalyzer.git`
-
-`cd ADBExtractorAndAnalyzer`
-
-`pip install -r requirements.txt`
-
-`python main.py`
+```bash
+    git clone https://github.com/labcif/ADBExtractorAndAnalyzer.git
+    cd ADBExtractorAndAnalyzer
+    pip install -r requirements.txt
+    python main.py
+    ````
 
 2. Install the necessary dependencies using `pip install -r requirements.txt`.
 3. Connect your Android device to the computer via USB debugging.
