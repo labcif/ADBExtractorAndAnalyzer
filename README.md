@@ -29,6 +29,12 @@ This Python program provides a comprehensive solution for extracting, analyzing,
 3. Connect your Android device to the computer via USB debugging.
 4. Run the Python program and select the desired extraction options (public, private, APK). `python main.py`
 
+## OS
+Tested on Linux.
+
 ## Contributors
 - Ricardo Bento Santos (https://github.com/RicardoBeny) - Creator and main developer
 - Guilherme dos Reis Guilherme (https://github.com/guilhermegui08) - Creator and main developer
+
+## License
+This project is licensed under the [GPL-3.0](LICENSE).
