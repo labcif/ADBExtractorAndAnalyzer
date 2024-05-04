@@ -21,4 +21,5 @@ This Python program provides a comprehensive solution for extracting, analyzing,
 4. Review the decompiled APK files for insights into their functionality.
 
 ## Contributors
-- [Your Name](https://github.com/your_username) - Creator and main developer
+- Ricardo Bento Santos (https://github.com/RicardoBeny) - Creator and main developer
+- Guilherme dos Reis Guilherme (https://github.com/guilhermegui08) - Creator and main developer
