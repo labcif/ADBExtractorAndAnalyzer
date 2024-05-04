@@ -1,2 +1,24 @@
-# ADBExtractorAndAnalyzer
-Python program: Extract, analyze, &amp; decompile Android data via ADB shell. Extract public, private, &amp; APK data. Analyze with JADX, ALEAPP, &amp; MobSF.
+# ADBExtractorAndAnalyzer 
+
+## Overview
+This Python program provides a comprehensive solution for extracting, analyzing, and decompiling data from Android devices using ADB (Android Debug Bridge) shell commands. It facilitates the extraction of public, private, and APK data from Android devices, followed by analysis and decompilation using JADX, ALEAPP, and MobSF.
+
+## Features
+- **Data Extraction:** Extracts public, private, and APK data from Android devices using ADB shell commands.
+- **Data Analysis:** Utilizes JADX, ALEAPP, and MobSF for analyzing the extracted data.
+- **Decompilation:** Decompiles APK files using JADX to provide insights into their inner workings.
+- **User-Friendly Interface:** Offers a user-friendly interface for ease of use.
+
+## Requirements
+- Python 3.x
+- ADB (Android Debug Bridge) installed on the system
+- JADX, ALEAPP, and MobSF installed and configured
+
+## Usage
+1. Connect your Android device to the computer via USB debugging.
+2. Run the Python program and select the desired extraction options (public, private, APK).
+3. Analyze the extracted data using JADX, ALEAPP, and MobSF.
+4. Review the decompiled APK files for insights into their functionality.
+
+## Contributors
+- [Your Name](https://github.com/your_username) - Creator and main developer
