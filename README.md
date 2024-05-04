@@ -10,15 +10,20 @@ This Python program provides a comprehensive solution for extracting, analyzing,
 - **User-Friendly Interface:** Offers a user-friendly interface for ease of use.
 
 ## Requirements
-- Python 3.x
-- ADB (Android Debug Bridge) installed on the system
-- JADX, ALEAPP, and MobSF installed and configured
+- *Python 3.x
+- *ADB (Android Debug Bridge) installed on the system
+- JADX, ALEAPP installed and configured
 
 ## Usage
-1. Connect your Android device to the computer via USB debugging.
-2. Run the Python program and select the desired extraction options (public, private, APK).
-3. Analyze the extracted data using JADX, ALEAPP, and MobSF.
-4. Review the decompiled APK files for insights into their functionality.
+1. Clone the repository.
+`git clone https://github.com/labcif/ADBExtractorAndAnalyzer.git
+cd ADBExtractorAndAnalyzer
+pip install -r requirements.txt
+python main.py`.
+3. Install the necessary dependencies using `pip install -r requirements.txt`.
+4. Connect your Android device to the computer via USB debugging.
+5. Run the Python program and select the desired extraction options (public, private, APK).
+`python main.py`
 
 ## Contributors
 - Ricardo Bento Santos (https://github.com/RicardoBeny) - Creator and main developer
