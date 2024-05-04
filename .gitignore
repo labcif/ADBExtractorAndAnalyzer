@@ -1,0 +1,39 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+
+# Caches and logs
+*.log
+*.cache
+
+# Virtual environment
+venv/
+env/
+.venv/
+.env/
+
+# IDE specific files
+.vscode/
+*.sublime-project
+*.sublime-workspace
+.idea/
+
+# Ignore Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Ignore directories starting with ./public, ./private, and ./apk
+/public*/
+/private*/
+/apk*/
+/decompiled*/
+
+# Ignore directories starting with ./public, ./private, and ./apk
+/public*/
+/private*/
+/apk*/
+
+last_selected_file.txt
+last_jadx_file.txt
+last_output_file.txt
+
+logs.txt
