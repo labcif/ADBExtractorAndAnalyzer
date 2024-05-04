@@ -5,7 +5,7 @@ This Python program provides a comprehensive solution for extracting, analyzing,
 
 ## Features
 - **Data Extraction:** Extracts public, private, and APK data from Android devices using ADB shell commands.
-- **Data Analysis:** Utilizes JADX, ALEAPP, and MobSF for analyzing the extracted data.
+- **Data Analysis:** Utilizes ALEAPP, and MobSF for analyzing the extracted data.
 - **Decompilation:** Decompiles APK files using JADX to provide insights into their inner workings.
 - **User-Friendly Interface:** Offers a user-friendly interface for ease of use.
 
