@@ -101,8 +101,12 @@ def applicationGUI():
     def extract_and_analyse2():
         log_procedure("Starting extraction and analysis process")
         
-        url = "http://192.144.168.75/api_docs"
+        endpoint = "172.22.21.51:8000"
+        if mobsf_entry2.get().strip():
+            endpoint = mobsf_entry2.get().strip()
+        
         try:
+            url = f"http://{endpoint}/api_docs"
             response = requests.get(url)
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'html.parser')
@@ -117,8 +121,8 @@ def applicationGUI():
 
         except requests.exceptions.RequestException as e:
             log_procedure(f"An error occurred: {e}")
-            
-        SERVER = "http://192.144.168.75"
+
+        SERVER = f"http://{endpoint}"
         APIKEY = api_key_value
         paths = extract_selected_files2()
         log_procedure(f"Selected files to process: {paths}")
@@ -128,21 +132,19 @@ def applicationGUI():
                 try:
                     FILE = paths[0] + paths[i] + "/base.apk"
 
-                    """Upload File"""
                     log_procedure("Uploading file")
                     multipart_data = MultipartEncoder(fields={'file': (FILE, open(FILE, 'rb'), 'application/octet-stream')})
                     headers = {'Content-Type': multipart_data.content_type, 'Authorization': APIKEY}
                     response = requests.post(SERVER + '/api/v1/upload', data=multipart_data, headers=headers)
                     data0 = response.text
 
-                    """Scan the file"""
                     log_procedure("Scanning file")
                     post_dict = json.loads(data0)
                     headers = {'Authorization': APIKEY}
                     response = requests.post(SERVER + '/api/v1/scan', data=post_dict, headers=headers)
                     
                     data = {"hash": json.loads(data0)["hash"]}
-                    webbrowser.open_new_tab(f"http://192.144.168.75/StaticAnalyzer/?name=base.apk&type=apk&checksum={data['hash']}")
+                    webbrowser.open_new_tab(f"http://{endpoint}/static_analyzer/{data['hash']}/")
                     log_procedure("HTML report opened in web browser")
 
                 except requests.exceptions.RequestException as e:
@@ -298,7 +300,7 @@ def applicationGUI():
                 widget.var.set(1)
 
     def deselect_all_items():
-        # Iterate through all items in the listbox
+        # Iterate through all itemshtt in the listbox
         for widget in listbox.winfo_children():
             if isinstance(widget, tk.Checkbutton):
                 widget.var.set(0)
@@ -483,6 +485,17 @@ def applicationGUI():
                 return file.read().strip()
         else:
             return ""
+    
+    def save_entry_content(event=None):
+        content = mobsf_entry2.get().strip()
+        with open("mobsf_entry_content.txt", "w") as file:
+            file.write(content)
+
+    def load_entry_content():
+        if os.path.exists("mobsf_entry_content.txt"):
+            with open("mobsf_entry_content.txt", "r") as file:
+                content = file.read()
+                mobsf_entry2.insert(tk.END, content)
 
     def browse_file3():
         filename = filedialog.askopenfilename()
@@ -567,7 +580,9 @@ def applicationGUI():
     top_center_left_left_frame = tk.Label(top_center_left_frame)
     top_center_left_left_frame.pack(side=tk.LEFT, fill=tk.X)
     top_center_left_right_frame = tk.Label(top_center_left_frame)
-    top_center_left_right_frame.pack(side=tk.RIGHT, fill=tk.X)
+    top_center_left_right_frame.pack(side=tk.RIGHT)
+    top_center_left_right_left_frame = tk.Label(top_center_left_frame)
+    top_center_left_right_left_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
     apk_file_label = tk.Label(top_center_left_left_frame, text="APK Files", font=("consolas", 16))
     apk_file_label.pack(side=tk.TOP, padx=5, pady=5)
     select_all_button2 = tk.Button(top_center_left_right_frame, text="Select ALL", command=toggle_select_all2)
@@ -578,6 +593,11 @@ def applicationGUI():
     apk_entry.pack(side=tk.RIGHT ,padx=5, pady=5)
     apk_filter_label = tk.Label(top_center_left_frame, text="Filter:")
     apk_filter_label.pack(padx=5, pady=5, side=tk.RIGHT)
+    mobsf_entry2 = tk.Entry(top_center_left_right_left_frame)
+    mobsf_entry2.pack(side=tk.RIGHT ,padx=5, pady=5)
+    load_entry_content()
+    mobsf_label = tk.Label(top_center_left_right_left_frame, text="Mobsf (ip:port):")
+    mobsf_label.pack(padx=5, pady=5, side=tk.RIGHT)
 
     top_right_left_frame = tk.Label(top_right_frame)
     top_right_left_frame.pack(side=tk.TOP, fill=tk.X)
@@ -653,6 +673,7 @@ def applicationGUI():
     extract_button3 = tk.Button(bot_right_frame, text="Extract Selected Files", command=extract_selected_files3)
     extract_button3.pack(pady=5)
 
+    root.bind("<Destroy>", save_entry_content)
     # Run the GUI
     root.mainloop()
 
