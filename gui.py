@@ -24,6 +24,7 @@ from core import (
     run_jadx,
     run_mobsf,
     save_prefs,
+    full_device_dump
 )
 
 
@@ -351,6 +352,10 @@ class ADBExtractorApp(tk.Tk):
             font=FONTS["title"]
         ).pack(side=tk.LEFT)
 
+        # dump_btn = tk.Button(hdr, text="Full Dump", command=self._do_full_dump)
+        # _style_button(dump_btn)
+        # dump_btn.pack(side=tk.RIGHT, padx=4, pady=6)
+
         out_frame = tk.Frame(hdr, bg=COLORS["accent"])
         out_frame.pack(side=tk.RIGHT, padx=10)
 
@@ -619,6 +624,22 @@ class ADBExtractorApp(tk.Tk):
         log(f"Extracting public data: {selected}")
         self._run_async(extract_public_data, selected,
                         self._output_var.get() or None)
+
+    # ------------------------------------------------------------------
+    # Action handlers — Full Dump
+    # ------------------------------------------------------------------
+
+    def _do_full_dump(self) -> None:
+        self._status.set("Creating full device dump…", busy=True)
+
+        def task():
+            try:
+                full_device_dump(self._output_var.get() or None)
+            except Exception as e:
+                log(f"Full dump failed: {e}")
+                self.after(0, lambda: messagebox.showerror("Error", str(e)))
+
+        self._run_async(task)
 
     # ------------------------------------------------------------------
     # Lifecycle
