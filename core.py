@@ -139,6 +139,15 @@ def _pull_folder(remote: str, local_base: str | None) -> str:
     return os.path.join(dest, folder_name)
 
 
+def get_last_log_line() -> str:
+    try:
+        with open(LOG_FILE, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        return lines[-1].strip() if lines else ""
+    except OSError:
+        return ""
+
+
 # ---------------------------------------------------------------------------
 # Device listing helpers (used by the GUI to populate checklists)
 # ---------------------------------------------------------------------------

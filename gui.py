@@ -24,7 +24,8 @@ from core import (
     run_jadx,
     run_mobsf,
     save_prefs,
-    full_device_dump
+    full_device_dump,
+    get_last_log_line,
 )
 
 
@@ -265,12 +266,47 @@ class StatusBar(tk.Frame):
         self.pack_propagate(False)
 
         self._msg = tk.StringVar(value="Ready")
-        tk.Label(self, textvariable=self._msg,
-                 bg=COLORS["accent"], fg=COLORS["text"],
-                 font=FONTS["status"], anchor="w").pack(side=tk.LEFT, padx=10, fill=tk.Y)
+        self._log_preview = tk.StringVar(value="")
 
-        self._progress = ttk.Progressbar(self, mode="indeterminate", length=120)
-        self._progress.pack(side=tk.RIGHT, padx=10, pady=4)
+        left = tk.Frame(self, bg=COLORS["accent"])
+        left.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(10, 6))
+
+        self._msg_label = tk.Label(
+            left,
+            textvariable=self._msg,
+            bg=COLORS["accent"],
+            fg=COLORS["text"],
+            font=FONTS["status"],
+            anchor="w"
+        )
+        self._msg_label.pack(side=tk.LEFT)
+
+        self._sep_label = tk.Label(
+            left,
+            text="  |  ",
+            bg=COLORS["accent"],
+            fg=COLORS["text_dim"],
+            font=FONTS["status"],
+            anchor="w"
+        )
+        self._sep_label.pack(side=tk.LEFT)
+
+        self._log_label = tk.Label(
+            left,
+            textvariable=self._log_preview,
+            bg=COLORS["accent"],
+            fg=COLORS["text_dim"],
+            font=FONTS["status"],
+            anchor="w",
+            justify="left"
+        )
+        self._log_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        right = tk.Frame(self, bg=COLORS["accent"])
+        right.pack(side=tk.RIGHT, padx=10)
+
+        self._progress = ttk.Progressbar(right, mode="indeterminate", length=120)
+        self._progress.pack(side=tk.RIGHT, pady=4)
 
     def set(self, msg: str, busy: bool = False) -> None:
         self._msg.set(msg)
@@ -278,6 +314,15 @@ class StatusBar(tk.Frame):
             self._progress.start(10)
         else:
             self._progress.stop()
+    
+    def _truncate(self, text: str, limit: int = 80) -> str:
+        text = text.strip()
+        if len(text) <= limit:
+            return text
+        return text[:limit - 3] + "..."   
+
+    def set_log_preview(self, msg: str) -> None:
+        self._log_preview.set(self._truncate(msg, 90))
 
 
 # ---------------------------------------------------------------------------
@@ -512,8 +557,28 @@ class ADBExtractorApp(tk.Tk):
     # ------------------------------------------------------------------
     # Background task runner — keeps UI responsive
     # ------------------------------------------------------------------
+    
+    def _start_log_monitor(self) -> None:
+        self._monitor_logs = True
+        self._poll_log_file()
+
+    def _stop_log_monitor(self) -> None:
+        self._monitor_logs = False
+        self._status.set_log_preview("")
+
+    def _poll_log_file(self) -> None:
+        if not getattr(self, "_monitor_logs", False):
+            return
+
+        last = get_last_log_line()
+        if last:
+            self._status.set_log_preview(last)
+
+        self.after(500, self._poll_log_file)
 
     def _run_async(self, fn, *args) -> None:
+        self._start_log_monitor()
+
         def wrapper():
             try:
                 fn(*args)
@@ -522,6 +587,7 @@ class ADBExtractorApp(tk.Tk):
                 self.after(0, lambda: messagebox.showerror("Error", str(e)))
             finally:
                 self.after(0, lambda: self._status.set("Ready", busy=False))
+                self.after(0, self._stop_log_monitor)
 
         threading.Thread(target=wrapper, daemon=True).start()
 
