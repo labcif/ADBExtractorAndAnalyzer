@@ -106,13 +106,14 @@ class ChecklistPanel(tk.Frame):
         self._vars: dict[str, tk.IntVar] = {}
         self._build(title)
 
+
     def _build(self, title: str) -> None:
         # Header row
         header = tk.Frame(self, bg=COLORS["panel"])
         header.pack(fill=tk.X, padx=8, pady=(8, 4))
 
         tk.Label(header, text=title, bg=COLORS["panel"],
-                 fg=COLORS["highlight"], font=FONTS["section"]).pack(side=tk.LEFT)
+                fg=COLORS["highlight"], font=FONTS["section"]).pack(side=tk.LEFT)
 
         self._toggle_btn = tk.Button(header, text="☑ All", command=self.toggle_all)
         _style_button(self._toggle_btn)
@@ -129,46 +130,92 @@ class ChecklistPanel(tk.Frame):
         filter_entry.bind("<Return>", lambda e: self.populate())
 
         tk.Label(header, text="Filter:", bg=COLORS["panel"],
-                 fg=COLORS["text_dim"], font=FONTS["label"]).pack(side=tk.RIGHT)
+                fg=COLORS["text_dim"], font=FONTS["label"]).pack(side=tk.RIGHT)
 
         # Scrollable canvas
         canvas_frame = tk.Frame(self, bg=COLORS["panel"])
         canvas_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
 
-        self._scrollbar = tk.Scrollbar(canvas_frame, orient="vertical",
-                                       bg=COLORS["accent"],
-                                       troughcolor=COLORS["bg"])
+        # Scrollbar
+        self._scrollbar = tk.Scrollbar(
+            canvas_frame,
+            orient="vertical",
+            bg=COLORS["accent"],
+            troughcolor=COLORS["bg"]
+        )
         self._scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        self._canvas = tk.Canvas(canvas_frame,
-                                 yscrollcommand=self._scrollbar.set,
-                                 bg=COLORS["entry_bg"],
-                                 highlightthickness=0)
+        # Canvas
+        self._canvas = tk.Canvas(
+            canvas_frame,
+            yscrollcommand=self._scrollbar.set,
+            bg=COLORS["entry_bg"],
+            highlightthickness=0
+        )
         self._canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
         self._scrollbar.config(command=self._canvas.yview)
 
-        self._canvas.bind("<MouseWheel>", self._on_mousewheel)
-        self._canvas.bind("<Button-4>",   self._on_mousewheel)
-        self._canvas.bind("<Button-5>",   self._on_mousewheel)
+        # Inner frame
+        self._inner_frame = tk.Frame(
+            self._canvas,
+            bg=COLORS["entry_bg"],
+            padx=4,
+            pady=2
+        )
+
+        self._canvas_window = self._canvas.create_window(
+            (0, 0),
+            window=self._inner_frame,
+            anchor="nw"
+        )
+
+        # Resize + scroll region
+        self._inner_frame.bind(
+            "<Configure>",
+            lambda e: self._canvas.configure(scrollregion=self._canvas.bbox("all"))
+        )
+
+        self._canvas.bind(
+            "<Configure>",
+            lambda e: self._canvas.itemconfig(self._canvas_window, width=e.width)
+        )
+
+        # FIX: proper mousewheel handling
+        canvas_frame.bind("<Enter>", lambda e: self._bind_mousewheel())
+        canvas_frame.bind("<Leave>", lambda e: self._unbind_mousewheel())
 
         # Item count badge
         self._count_label = tk.Label(self, text="0 items",
-                                     bg=COLORS["panel"],
-                                     fg=COLORS["text_dim"],
-                                     font=FONTS["status"])
+                                    bg=COLORS["panel"],
+                                    fg=COLORS["text_dim"],
+                                    font=FONTS["status"])
         self._count_label.pack(pady=(0, 4))
 
+
+    def _bind_mousewheel(self):
+        self.bind_all("<MouseWheel>", self._on_mousewheel)
+        self.bind_all("<Button-4>", self._on_mousewheel)
+        self.bind_all("<Button-5>", self._on_mousewheel)
+
+
+    def _unbind_mousewheel(self):
+        self.unbind_all("<MouseWheel>")
+        self.unbind_all("<Button-4>")
+        self.unbind_all("<Button-5>")
+
+
     def _on_mousewheel(self, event: tk.Event) -> None:
-        if event.num == 4:
+        if event.num == 4:  # Linux scroll up
             self._canvas.yview_scroll(-1, "units")
-        elif event.num == 5:
+        elif event.num == 5:  # Linux scroll down
             self._canvas.yview_scroll(1, "units")
-        else:
+        elif event.delta:
             self._canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
+
     def populate(self) -> None:
-        """Fetch items and rebuild the checklist."""
-        for widget in self._canvas.winfo_children():
+        for widget in self._inner_frame.winfo_children():
             widget.destroy()
         self._vars.clear()
 
@@ -181,25 +228,23 @@ class ChecklistPanel(tk.Frame):
         visible = [line for line in items if not filt or filt in line.lower()]
         self._count_label.config(text=f"{len(visible)} items")
 
-        for i, item in enumerate(visible):
+        for item in visible:
             var = tk.IntVar()
             self._vars[item] = var
+
             cb = tk.Checkbutton(
-                self._canvas, text=item, variable=var,
-                bg=COLORS["entry_bg"], fg=COLORS["text"],
+                self._inner_frame,   # 👈 changed from self._canvas
+                text=item,
+                variable=var,
+                bg=COLORS["entry_bg"],
+                fg=COLORS["text"],
                 selectcolor=COLORS["accent"],
                 activebackground=COLORS["accent"],
                 activeforeground=COLORS["highlight"],
                 font=FONTS["label"],
                 anchor="w",
             )
-            self._canvas.create_window(
-                4, i * 22, anchor="nw", window=cb,
-                width=self._canvas.winfo_reqwidth(),
-            )
-
-        self._canvas.update_idletasks()
-        self._canvas.config(scrollregion=self._canvas.bbox("all"))
+            cb.pack(fill=tk.X, anchor="w", padx=4, pady=1)
 
     def get_selected(self) -> list[str]:
         return [name for name, var in self._vars.items() if var.get() == 1]
