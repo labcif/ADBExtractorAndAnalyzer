@@ -35,5 +35,6 @@ env/
 last_selected_file.txt
 last_jadx_file.txt
 last_output_file.txt
+preferences.json
 
 logs.txt
