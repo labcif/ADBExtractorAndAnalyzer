@@ -31,6 +31,7 @@ env/
 /public*/
 /private*/
 /apk*/
+preferences.json
 
 last_selected_file.txt
 last_jadx_file.txt
