@@ -12,7 +12,7 @@ This Python program provides a comprehensive solution for extracting, analyzing,
 - **User-Friendly Interface:** Offers a user-friendly interface for ease of use.
 
 ## Requirements
-- *Python 3.x
+- *Python 3.x (3.10 recommended)
 - *ADB (Android Debug Bridge) installed on the system
 - JADX, ALEAPP installed and configured
 
@@ -27,7 +27,7 @@ This Python program provides a comprehensive solution for extracting, analyzing,
 ```
 
 2. Install the necessary dependencies using `pip install -r requirements.txt`.
-3. Connect your Android device to the computer via USB debugging.
+3. Turn on your Android Virtual Device or connect the device to the computer via USB debugging.
 4. Run the Python program and select the desired extraction options (public, private, APK). `python main.py`
 
 ## OS

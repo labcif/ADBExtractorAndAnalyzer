@@ -326,6 +326,61 @@ def extract_public_data(selected: list[str], output_path: str | None) -> str | N
 
 
 # ---------------------------------------------------------------------------
+# Extraction — All Data
+# ---------------------------------------------------------------------------
+
+def full_device_dump(output_path: str | None) -> str | None:
+    folder_name = f"full_logical_backup_{_timestamp()}"
+    base = output_path if output_path else get_cwd()
+    local_dir = os.path.join(base, folder_name)
+    os.makedirs(local_dir, exist_ok=True)
+
+    # Step 1: get mount points
+    mounts = adb_shell_su("cat /proc/mounts")
+    if not mounts:
+        log("Failed to read mount points")
+        return None
+
+    valid_mounts = []
+
+    for line in mounts.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+
+        mount_point = parts[1]
+        fs_type = parts[2]
+
+        # Exclude virtual/system mounts
+        if fs_type in ("proc", "sysfs", "tmpfs", "devpts", "selinuxfs", "debugfs"):
+            continue
+
+        # Exclude problematic paths
+        if mount_point.startswith(("/proc", "/sys", "/dev")):
+            continue
+
+        valid_mounts.append(mount_point)
+
+    # Remove duplicates and sort
+    valid_mounts = sorted(set(valid_mounts))
+
+    log(f"Discovered mount points: {valid_mounts}")
+
+    # Step 2: stream each mount
+    for mount in valid_mounts:
+        safe_name = mount.strip("/").replace("/", "_") or "root"
+        local_file = os.path.join(local_dir, f"{safe_name}.tar")
+
+        cmd = f'adb exec-out su -c "tar -cf - \\"{mount}\\"" > "{local_file}"'
+        shell_local(cmd)
+
+        log(f"Dumped mount: {mount}")
+
+    log(f"Full logical dump complete → {local_dir}")
+    return local_dir
+
+
+# ---------------------------------------------------------------------------
 # Analysis — ALEAPP
 # ---------------------------------------------------------------------------
 
