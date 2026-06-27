@@ -36,10 +36,12 @@ DEFAULT_PREFS = {
 # ---------------------------------------------------------------------------
 
 def log(message: str) -> None:
-    """Append a timestamped message to the log file."""
+    """Append a timestamped message to the log file and print to terminal."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    formatted = f"[{timestamp}] {message}"
     with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(f"[{timestamp}] {message}\n")
+        f.write(formatted + "\n")
+    print(formatted, flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -47,21 +49,28 @@ def log(message: str) -> None:
 # ---------------------------------------------------------------------------
 
 def load_prefs() -> dict:
+    log("Loading preferences...")
     if os.path.exists(PREFS_FILE):
         try:
             with open(PREFS_FILE, "r", encoding="utf-8") as f:
-                return {**DEFAULT_PREFS, **json.load(f)}
-        except (json.JSONDecodeError, OSError):
+                prefs = {**DEFAULT_PREFS, **json.load(f)}
+                log(f"Preferences loaded successfully from {PREFS_FILE}: {prefs}")
+                return prefs
+        except (json.JSONDecodeError, OSError) as e:
+            log(f"Error reading preferences from {PREFS_FILE}: {e}. Falling back to defaults.")
             pass
+    log(f"Using default preferences: {DEFAULT_PREFS}")
     return dict(DEFAULT_PREFS)
 
 
 def save_prefs(prefs: dict) -> None:
+    log(f"Saving preferences: {prefs}")
     try:
         with open(PREFS_FILE, "w", encoding="utf-8") as f:
             json.dump(prefs, f, indent=2)
+        log(f"Preferences successfully saved to {PREFS_FILE}")
     except OSError as e:
-        log(f"Failed to save preferences: {e}")
+        log(f"Failed to save preferences to {PREFS_FILE}: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +87,7 @@ IS_CANCELLED = False
 def set_cancelled(val: bool) -> None:
     global IS_CANCELLED
     IS_CANCELLED = val
+    log(f"Task cancellation flag set to: {val}")
 
 
 def is_cancelled() -> bool:
@@ -87,32 +97,40 @@ def is_cancelled() -> bool:
 def register_process(proc: subprocess.Popen) -> None:
     with SUBPROCESS_LOCK:
         ACTIVE_SUBPROCESSES.append(proc)
+        log(f"Registered active subprocess pid={proc.pid}. Total active processes: {len(ACTIVE_SUBPROCESSES)}")
 
 
 def unregister_process(proc: subprocess.Popen) -> None:
     with SUBPROCESS_LOCK:
         if proc in ACTIVE_SUBPROCESSES:
             ACTIVE_SUBPROCESSES.remove(proc)
+            log(f"Unregistered subprocess pid={proc.pid}. Total active processes: {len(ACTIVE_SUBPROCESSES)}")
 
 
 def cancel_active_tasks() -> None:
     set_cancelled(True)
+    log("User requested task cancellation. Terminating active background subprocesses...")
     with SUBPROCESS_LOCK:
+        log(f"Found {len(ACTIVE_SUBPROCESSES)} active subprocess(es) to terminate.")
         for proc in ACTIVE_SUBPROCESSES:
             try:
+                log(f"Terminating subprocess pid={proc.pid}...")
                 if os.name != 'nt':
                     # Kill process group to stop both shell and actual adb/other child processes
                     os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    log(f"Sent SIGKILL to process group of pid={proc.pid}")
                 else:
                     proc.terminate()
                     proc.kill()
+                    log(f"Terminated/killed process pid={proc.pid}")
             except Exception as e:
-                log(f"Error terminating process group: {e}")
+                log(f"Error terminating process group for pid={proc.pid}: {e}")
         ACTIVE_SUBPROCESSES.clear()
 
 
 def run_tracked_subprocess(cmd: list[str] | str, shell: bool = False, timeout: float | None = None) -> tuple[int, bytes]:
     """Runs a subprocess, registers it for cancellation, and returns (returncode, stdout)."""
+    log(f"Launching subprocess: command={cmd!r}, shell={shell}, timeout={timeout}")
     kwargs = {}
     if os.name != 'nt':
         kwargs['preexec_fn'] = os.setsid
@@ -124,18 +142,23 @@ def run_tracked_subprocess(cmd: list[str] | str, shell: bool = False, timeout: f
         stderr=subprocess.STDOUT,
         **kwargs
     )
+    log(f"Subprocess successfully spawned with pid={proc.pid}")
     register_process(proc)
     try:
         stdout, _ = proc.communicate(timeout=timeout)
+        log(f"Subprocess completed: pid={proc.pid}, returncode={proc.returncode}, output={len(stdout)} bytes")
         return proc.returncode, stdout
     except subprocess.TimeoutExpired:
+        log(f"Subprocess timeout expired: pid={proc.pid}, command={cmd!r}")
         if os.name != 'nt':
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except OSError:
-                pass
+                log(f"Sent SIGKILL to process group of pid={proc.pid}")
+            except OSError as e:
+                log(f"Failed to kill process group for pid={proc.pid}: {e}")
         else:
             proc.kill()
+            log(f"Killed subprocess: pid={proc.pid}")
         stdout, _ = proc.communicate()
         raise subprocess.TimeoutExpired(cmd, timeout, output=stdout)
     finally:
