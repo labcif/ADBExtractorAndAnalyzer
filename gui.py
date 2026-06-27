@@ -4,9 +4,10 @@ Theme constants, reusable UI components (ChecklistPanel, StatusBar),
 and the main ADBExtractorApp window class.
 """
 
+import os
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import ttk
 from PIL import Image, ImageTk
 
 
@@ -98,6 +99,7 @@ def _style_entry(entry: tk.Entry) -> None:
     entry.config(
         bg=COLORS["entry_bg"],
         fg=COLORS["text"],
+        readonlybackground=COLORS["entry_bg"],
         insertbackground=COLORS["highlight"],
         relief=tk.FLAT,
         font=FONTS["label"],
@@ -625,17 +627,17 @@ class ADBExtractorApp(tk.Tk):
     # ------------------------------------------------------------------
 
     def _browse_output(self) -> None:
-        path = filedialog.askdirectory()
+        path = ask_custom_directory(self)
         if path:
             self._output_var.set(path)
 
     def _browse_aleapp(self) -> None:
-        path = filedialog.askopenfilename()
+        path = ask_custom_openfilename(self)
         if path:
             self._aleapp_path_var.set(path)
 
     def _browse_jadx(self) -> None:
-        path = filedialog.askopenfilename()
+        path = ask_custom_openfilename(self)
         if path:
             self._jadx_path_var.set(path)
 
@@ -727,7 +729,7 @@ class ADBExtractorApp(tk.Tk):
                 from core import is_cancelled
                 if not is_cancelled():
                     log(f"Unhandled error in background task: {e}")
-                    self.after(0, lambda: messagebox.showerror("Error", str(e)))
+                    self.after(0, lambda: show_custom_error("Error", str(e), parent=self))
                 else:
                     log(f"Background task exception suppressed due to cancellation: {e}")
             finally:
@@ -744,8 +746,8 @@ class ADBExtractorApp(tk.Tk):
     def _do_extract_private(self) -> None:
         selected = self._private_panel.get_selected()
         if not selected:
-            messagebox.showwarning("Nothing selected",
-                                   "Please select at least one package.")
+            show_custom_warning("Nothing selected",
+                                "Please select at least one package.", parent=self)
             return
         self._status.set(f"Extracting {len(selected)} private package(s)…", busy=True)
         log(f"Extracting private data: {selected}")
@@ -755,13 +757,13 @@ class ADBExtractorApp(tk.Tk):
     def _do_extract_and_analyse(self) -> None:
         aleapp = self._aleapp_path_var.get().strip()
         if not aleapp:
-            messagebox.showerror("ALEAPP not set",
-                                 "Please select the ALEAPP script path.")
+            show_custom_error("ALEAPP not set",
+                              "Please select the ALEAPP script path.", parent=self)
             return
         selected = self._private_panel.get_selected()
         if not selected:
-            messagebox.showwarning("Nothing selected",
-                                   "Please select at least one package.")
+            show_custom_warning("Nothing selected",
+                                "Please select at least one package.", parent=self)
             return
         self._status.set("Extracting & running ALEAPP…", busy=True)
 
@@ -779,8 +781,8 @@ class ADBExtractorApp(tk.Tk):
     def _do_extract_apk(self) -> None:
         selected = self._apk_panel.get_selected()
         if not selected:
-            messagebox.showwarning("Nothing selected",
-                                   "Please select at least one APK.")
+            show_custom_warning("Nothing selected",
+                                "Please select at least one APK.", parent=self)
             return
         self._status.set(f"Extracting {len(selected)} APK(s)…", busy=True)
         self._run_async(extract_apk_files, selected, self._apk_dir_map,
@@ -789,8 +791,8 @@ class ADBExtractorApp(tk.Tk):
     def _do_extract_and_mobsf(self) -> None:
         selected = self._apk_panel.get_selected()
         if not selected:
-            messagebox.showwarning("Nothing selected",
-                                   "Please select at least one APK.")
+            show_custom_warning("Nothing selected",
+                                "Please select at least one APK.", parent=self)
             return
         endpoint = self._mobsf_var.get().strip() or DEFAULT_PREFS["mobsf_endpoint"]
         self._status.set("Extracting & scanning with MobSF…", busy=True)
@@ -805,13 +807,13 @@ class ADBExtractorApp(tk.Tk):
     def _do_extract_and_jadx(self) -> None:
         jadx = self._jadx_path_var.get().strip()
         if not jadx:
-            messagebox.showerror("JADX not set",
-                                 "Please select the JADX executable path.")
+            show_custom_error("JADX not set",
+                              "Please select the JADX executable path.", parent=self)
             return
         selected = self._apk_panel.get_selected()
         if not selected:
-            messagebox.showwarning("Nothing selected",
-                                   "Please select at least one APK.")
+            show_custom_warning("Nothing selected",
+                                "Please select at least one APK.", parent=self)
             return
         self._status.set("Extracting & decompiling with JADX…", busy=True)
 
@@ -829,8 +831,8 @@ class ADBExtractorApp(tk.Tk):
     def _do_extract_public(self) -> None:
         selected = self._public_panel.get_selected()
         if not selected:
-            messagebox.showwarning("Nothing selected",
-                                   "Please select at least one package.")
+            show_custom_warning("Nothing selected",
+                                "Please select at least one package.", parent=self)
             return
         self._status.set(f"Extracting {len(selected)} public package(s)…", busy=True)
         log(f"Extracting public data: {selected}")
@@ -843,7 +845,7 @@ class ADBExtractorApp(tk.Tk):
 
     def _do_full_dump(self) -> None:
         if not get_current_device():
-            messagebox.showwarning("No Device", "Please select a device before performing a full dump.")
+            show_custom_warning("No Device", "Please select a device before performing a full dump.", parent=self)
             return
 
         self._status.set("Creating full device dump…", busy=True)
@@ -852,12 +854,12 @@ class ADBExtractorApp(tk.Tk):
             try:
                 res = full_device_dump(self._output_var.get() or None)
                 if res:
-                    self.after(0, lambda: messagebox.showinfo("Success", f"Full dump completed successfully!\nSaved to: {res}"))
+                    self.after(0, lambda: show_custom_info("Success", f"Full dump completed successfully!\nSaved to: {res}", parent=self))
                 else:
-                    self.after(0, lambda: messagebox.showerror("Error", "Full dump failed. Check logs.txt for details."))
+                    self.after(0, lambda: show_custom_error("Error", "Full dump failed. Check logs.txt for details.", parent=self))
             except Exception as e:
                 log(f"Full dump failed: {e}")
-                self.after(0, lambda: messagebox.showerror("Error", str(e)))
+                self.after(0, lambda: show_custom_error("Error", str(e), parent=self))
 
         self._run_async(task)
 
@@ -1052,12 +1054,435 @@ class DeviceSelectorDialog(tk.Toplevel):
             self.selected_device = val
             self.destroy()
         else:
-            messagebox.showwarning(
+            show_custom_warning(
                 "No Device Selected",
                 "Please connect a device and click Refresh, or run without a device.",
                 parent=self
             )
 
-    def _on_disconnect(self):
+    def _on_disconnect(self) -> None:
         self.selected_device = "None"
         self.destroy()
+
+
+# ---------------------------------------------------------------------------
+# Custom Styled Dialogs & Popups
+# ---------------------------------------------------------------------------
+
+class CustomMessageBox(tk.Toplevel):
+    def __init__(self, parent, title: str, message: str, type_="info"):
+        super().__init__(parent, bg=COLORS["bg"])
+        self.title(title)
+        self.geometry("450x200")
+        self.resizable(False, False)
+        
+        # Center relative to parent
+        self.update_idletasks()
+        if parent:
+            parent_x = parent.winfo_x()
+            parent_y = parent.winfo_y()
+            parent_w = parent.winfo_width()
+            parent_h = parent.winfo_height()
+        else:
+            parent_x = 0
+            parent_y = 0
+            parent_w = self.winfo_screenwidth()
+            parent_h = self.winfo_screenheight()
+            
+        if parent_w < 100 or parent_h < 100:
+            parent_w = self.winfo_screenwidth()
+            parent_h = self.winfo_screenheight()
+            parent_x = 0
+            parent_y = 0
+            
+        x = parent_x + (parent_w - 450) // 2
+        y = parent_y + (parent_h - 200) // 2
+        self.geometry(f"+{x}+{y}")
+        
+        if parent:
+            self.transient(parent)
+            self.grab_set()
+            
+        self.type_ = type_
+        self.message = message
+        
+        self._build_ui()
+        
+    def _build_ui(self) -> None:
+        hdr = tk.Frame(self, bg=COLORS["panel"], height=45)
+        hdr.pack(fill=tk.X)
+        hdr.pack_propagate(False)
+        
+        icon = "ℹ"
+        icon_color = COLORS["success"]
+        if self.type_ == "warning":
+            icon = "⚠"
+            icon_color = COLORS["warning"]
+        elif self.type_ == "error":
+            icon = "✖"
+            icon_color = COLORS["highlight"]
+            
+        lbl = tk.Label(
+            hdr,
+            text=f"{icon} {self.title().upper()}",
+            bg=COLORS["panel"],
+            fg=icon_color,
+            font=FONTS["section"]
+        )
+        lbl.pack(pady=10)
+        
+        body = tk.Frame(self, bg=COLORS["bg"], padx=25, pady=20)
+        body.pack(fill=tk.BOTH, expand=True)
+        
+        msg_lbl = tk.Label(
+            body,
+            text=self.message,
+            bg=COLORS["bg"],
+            fg=COLORS["text"],
+            font=FONTS["label"],
+            wraplength=400,
+            justify=tk.LEFT,
+            anchor="nw"
+        )
+        msg_lbl.pack(fill=tk.BOTH, expand=True)
+        
+        footer = tk.Frame(self, bg=COLORS["bg"], pady=12, padx=25)
+        footer.pack(fill=tk.X, side=tk.BOTTOM)
+        
+        ok_btn = tk.Button(footer, text="OK", width=10, command=self.destroy)
+        _style_button(ok_btn)
+        ok_btn.pack(side=tk.RIGHT)
+
+
+class CustomFileDialog(tk.Toplevel):
+    def __init__(self, parent, title="Select Directory", is_directory_only=True, initial_dir=None):
+        super().__init__(parent, bg=COLORS["bg"])
+        self.title(title)
+        self.geometry("650x480")
+        
+        # Center relative to parent
+        self.update_idletasks()
+        if parent:
+            parent_x = parent.winfo_x()
+            parent_y = parent.winfo_y()
+            parent_w = parent.winfo_width()
+            parent_h = parent.winfo_height()
+        else:
+            parent_x = 0
+            parent_y = 0
+            parent_w = self.winfo_screenwidth()
+            parent_h = self.winfo_screenheight()
+            
+        if parent_w < 100 or parent_h < 100:
+            parent_w = self.winfo_screenwidth()
+            parent_h = self.winfo_screenheight()
+            parent_x = 0
+            parent_y = 0
+            
+        x = parent_x + (parent_w - 650) // 2
+        y = parent_y + (parent_h - 480) // 2
+        self.geometry(f"+{x}+{y}")
+        
+        if parent:
+            self.transient(parent)
+            self.grab_set()
+            
+        self.is_directory_only = is_directory_only
+        self.selected_path = None
+        
+        # Set initial directory
+        if initial_dir and os.path.exists(initial_dir):
+            self.current_dir = os.path.abspath(initial_dir)
+        else:
+            self.current_dir = os.path.abspath(os.getcwd())
+            
+        self._build_ui()
+        self._populate_list()
+        
+    def _build_ui(self) -> None:
+        import os
+        
+        # Header
+        hdr = tk.Frame(self, bg=COLORS["panel"], height=45)
+        hdr.pack(fill=tk.X)
+        hdr.pack_propagate(False)
+        
+        title_lbl = tk.Label(
+            hdr,
+            text=self.title().upper(),
+            bg=COLORS["panel"],
+            fg=COLORS["highlight"],
+            font=FONTS["section"]
+        )
+        title_lbl.pack(pady=10)
+        
+        # Nav bar
+        nav = tk.Frame(self, bg=COLORS["bg"], padx=15, pady=8)
+        nav.pack(fill=tk.X)
+        
+        up_btn = tk.Button(nav, text="📁 ⬉ Up", command=self._go_up)
+        _style_button(up_btn)
+        up_btn.pack(side=tk.LEFT, padx=(0, 5))
+        
+        home_btn = tk.Button(nav, text="🏠 Home", command=self._go_home)
+        _style_button(home_btn)
+        home_btn.pack(side=tk.LEFT, padx=(0, 5))
+        
+        self._path_var = tk.StringVar(value=self.current_dir)
+        path_entry = tk.Entry(nav, textvariable=self._path_var)
+        _style_entry(path_entry)
+        path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        path_entry.bind("<Return>", lambda e: self._go_to_path())
+        
+        go_btn = tk.Button(nav, text="Go", command=self._go_to_path)
+        _style_button(go_btn)
+        go_btn.pack(side=tk.RIGHT, padx=(5, 0))
+        
+        # List Container
+        body = tk.Frame(self, bg=COLORS["bg"], padx=15, pady=5)
+        body.pack(fill=tk.BOTH, expand=True)
+        
+        style = ttk.Style(self)
+        style.configure(
+            "FileDialog.Treeview",
+            background=COLORS["panel"],
+            foreground=COLORS["text"],
+            fieldbackground=COLORS["panel"],
+            font=FONTS["label"],
+            rowheight=24,
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        style.map(
+            "FileDialog.Treeview",
+            background=[("selected", COLORS["highlight"])],
+            foreground=[("selected", COLORS["text"])],
+        )
+        style.configure(
+            "FileDialog.Treeview.Heading",
+            background=COLORS["accent"],
+            foreground=COLORS["text"],
+            font=FONTS["button"],
+            relief="flat",
+        )
+        
+        cols = ("name", "type", "size")
+        self._tree = ttk.Treeview(
+            body,
+            columns=cols,
+            show="headings",
+            style="FileDialog.Treeview",
+            selectmode="browse"
+        )
+        self._tree.heading("name", text="Name", anchor="w")
+        self._tree.heading("type", text="Type", anchor="w")
+        self._tree.heading("size", text="Size", anchor="w")
+        
+        self._tree.column("name", width=330, anchor="w")
+        self._tree.column("type", width=100, anchor="w")
+        self._tree.column("size", width=100, anchor="w")
+        
+        scrollbar = ttk.Scrollbar(body, orient="vertical", command=self._tree.yview)
+        self._tree.configure(yscrollcommand=scrollbar.set)
+        
+        self._tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self._tree.bind("<Double-1>", self._on_double_click)
+        self._tree.bind("<<TreeviewSelect>>", self._on_select_change)
+        
+        # Footer
+        footer = tk.Frame(self, bg=COLORS["bg"], padx=15, pady=10)
+        footer.pack(fill=tk.X, side=tk.BOTTOM)
+        
+        self._selection_var = tk.StringVar(value="")
+        selection_lbl = tk.Label(
+            footer,
+            text="Selected Folder:" if self.is_directory_only else "Selected File:",
+            bg=COLORS["bg"],
+            fg=COLORS["text_dim"],
+            font=FONTS["label"],
+            anchor="w"
+        )
+        selection_lbl.pack(fill=tk.X, pady=(0, 5))
+        
+        selection_entry = tk.Entry(footer, textvariable=self._selection_var, state="readonly")
+        _style_entry(selection_entry)
+        selection_entry.pack(fill=tk.X, pady=(0, 10))
+        
+        btn_frame = tk.Frame(footer, bg=COLORS["bg"])
+        btn_frame.pack(fill=tk.X)
+        
+        cancel_btn = tk.Button(btn_frame, text="Cancel", command=self.destroy)
+        _style_button(cancel_btn)
+        cancel_btn.pack(side=tk.RIGHT, padx=(5, 0))
+        
+        ok_lbl = "Select Folder" if self.is_directory_only else "Open File"
+        ok_btn = tk.Button(btn_frame, text=ok_lbl, command=self._on_ok)
+        _style_button(ok_btn)
+        ok_btn.pack(side=tk.RIGHT)
+        
+    def _populate_list(self) -> None:
+        import os
+        for item in self._tree.get_children():
+            self._tree.delete(item)
+            
+        self._path_var.set(self.current_dir)
+        if self.is_directory_only:
+            self._selection_var.set(self.current_dir)
+        else:
+            self._selection_var.set("")
+            
+        try:
+            items = os.listdir(self.current_dir)
+        except OSError as e:
+            show_custom_error("Error", f"Failed to list directory:\n{e}", parent=self)
+            return
+            
+        dirs = []
+        files = []
+        for item in items:
+            full_path = os.path.join(self.current_dir, item)
+            try:
+                if os.path.isdir(full_path):
+                    dirs.append(item)
+                else:
+                    if not self.is_directory_only:
+                        files.append(item)
+            except OSError:
+                pass
+                
+        dirs.sort(key=str.lower)
+        files.sort(key=str.lower)
+        
+        for d in dirs:
+            self._tree.insert("", "end", values=(f"📁 {d}", "Folder", ""))
+            
+        for f in files:
+            full_path = os.path.join(self.current_dir, f)
+            try:
+                sz_bytes = os.path.getsize(full_path)
+                sz_str = self._format_size(sz_bytes)
+            except OSError:
+                sz_str = "Unknown"
+            self._tree.insert("", "end", values=(f"📄 {f}", "File", sz_str))
+            
+    def _format_size(self, size_bytes: int) -> str:
+        for unit in ["B", "KB", "MB", "GB"]:
+            if size_bytes < 1024.0:
+                return f"{size_bytes:.1f} {unit}"
+            size_bytes /= 1024.0
+        return f"{size_bytes:.1f} TB"
+        
+    def _go_up(self) -> None:
+        import os
+        parent = os.path.dirname(self.current_dir)
+        if parent != self.current_dir:
+            self.current_dir = parent
+            self._populate_list()
+            
+    def _go_home(self) -> None:
+        import os
+        home = os.path.expanduser("~")
+        if os.path.exists(home):
+            self.current_dir = home
+            self._populate_list()
+            
+    def _go_to_path(self) -> None:
+        import os
+        path = self._path_var.get().strip()
+        if os.path.exists(path) and os.path.isdir(path):
+            self.current_dir = os.path.abspath(path)
+            self._populate_list()
+        else:
+            show_custom_warning("Invalid Path", f"The directory does not exist:\n{path}", parent=self)
+            self._path_var.set(self.current_dir)
+            
+    def _on_double_click(self, event) -> None:
+        import os
+        sel = self._tree.selection()
+        if not sel:
+            return
+        vals = self._tree.item(sel[0], "values")
+        name = vals[0][2:]
+        full_path = os.path.join(self.current_dir, name)
+        
+        if vals[1] == "Folder":
+            if os.path.exists(full_path) and os.path.isdir(full_path):
+                self.current_dir = full_path
+                self._populate_list()
+        else:
+            if not self.is_directory_only:
+                self.selected_path = full_path
+                self.destroy()
+                
+    def _on_select_change(self, event) -> None:
+        import os
+        sel = self._tree.selection()
+        if not sel:
+            if self.is_directory_only:
+                self._selection_var.set(self.current_dir)
+            else:
+                self._selection_var.set("")
+            return
+            
+        vals = self._tree.item(sel[0], "values")
+        name = vals[0][2:]
+        full_path = os.path.join(self.current_dir, name)
+        
+        if self.is_directory_only:
+            if vals[1] == "Folder":
+                self._selection_var.set(full_path)
+            else:
+                self._selection_var.set(self.current_dir)
+        else:
+            if vals[1] == "File":
+                self._selection_var.set(full_path)
+            else:
+                self._selection_var.set("")
+                
+    def _on_ok(self) -> None:
+        import os
+        if self.is_directory_only:
+            sel_path = self._selection_var.get()
+            if os.path.exists(sel_path) and os.path.isdir(sel_path):
+                self.selected_path = sel_path
+                self.destroy()
+            else:
+                show_custom_warning("Invalid Folder", "Please select a valid folder.", parent=self)
+        else:
+            sel_path = self._selection_var.get()
+            if sel_path and os.path.exists(sel_path) and os.path.isfile(sel_path):
+                self.selected_path = sel_path
+                self.destroy()
+            else:
+                show_custom_warning("Invalid File", "Please select a valid file.", parent=self)
+
+
+# Helper Functions
+def show_custom_info(title: str, message: str, parent=None) -> None:
+    dialog = CustomMessageBox(parent, title, message, type_="info")
+    if parent:
+        parent.wait_window(dialog)
+
+def show_custom_warning(title: str, message: str, parent=None) -> None:
+    dialog = CustomMessageBox(parent, title, message, type_="warning")
+    if parent:
+        parent.wait_window(dialog)
+
+def show_custom_error(title: str, message: str, parent=None) -> None:
+    dialog = CustomMessageBox(parent, title, message, type_="error")
+    if parent:
+        parent.wait_window(dialog)
+
+def ask_custom_directory(parent, title="Select Directory", initial_dir=None) -> str | None:
+    dialog = CustomFileDialog(parent, title=title, is_directory_only=True, initial_dir=initial_dir)
+    if parent:
+        parent.wait_window(dialog)
+    return dialog.selected_path
+
+def ask_custom_openfilename(parent, title="Select File", initial_dir=None) -> str | None:
+    dialog = CustomFileDialog(parent, title=title, is_directory_only=False, initial_dir=initial_dir)
+    if parent:
+        parent.wait_window(dialog)
+    return dialog.selected_path
