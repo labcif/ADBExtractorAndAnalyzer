@@ -30,6 +30,8 @@ from core import (
     set_current_device,
     get_current_device,
     list_adb_devices,
+    find_files_on_device,
+    extract_files_from_device,
 )
 
 
@@ -123,6 +125,7 @@ class ChecklistPanel(tk.Frame):
 
     def __init__(self, parent, title: str, fetch_items, **kwargs):
         super().__init__(parent, bg=COLORS["panel"], **kwargs)
+        self._title = title
         self._fetch_items = fetch_items
         self._vars: dict[str, tk.IntVar] = {}
         self._build(title)
@@ -242,9 +245,10 @@ class ChecklistPanel(tk.Frame):
         self._vars.clear()
 
         # Show loading indicator
+        loading_text = "Searching files on device..." if "Search" in getattr(self, "_title", "") else "Loading packages from device..."
         loading_label = tk.Label(
             self._inner_frame,
-            text="Loading packages from device...",
+            text=loading_text,
             bg=COLORS["entry_bg"],
             fg=COLORS["text_dim"],
             font=FONTS["label"]
@@ -255,7 +259,17 @@ class ChecklistPanel(tk.Frame):
         # Run fetch in background
         def worker():
             try:
-                items = self._fetch_items()
+                import inspect
+                sig = inspect.signature(self._fetch_items)
+                has_args = len(sig.parameters) > 0
+            except Exception:
+                has_args = False
+
+            try:
+                if has_args:
+                    items = self._fetch_items(self._filter_var.get())
+                else:
+                    items = self._fetch_items()
             except Exception as e:
                 log(f"Error fetching items: {e}")
                 items = None
@@ -539,17 +553,34 @@ class ADBExtractorApp(tk.Tk):
             ("Extract & Decompile (JADX)", self._do_extract_and_jadx),
         ])
 
-        # Column 3 — Public Data
+        # Column 3 — Public Data & Search Section
         col3 = tk.Frame(body, bg=COLORS["panel"])
         col3.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4)
 
+        # Upper Half: Public Data
+        upper_half = tk.Frame(col3, bg=COLORS["panel"])
+        upper_half.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(0, 4))
+
         self._public_panel = ChecklistPanel(
-            col3, "Public Data  /sdcard/Android/data/", self._fetch_public
+            upper_half, "Public Data  /sdcard/Android/data/", self._fetch_public
         )
         self._public_panel.pack(fill=tk.BOTH, expand=True)
 
-        self._build_col_buttons(col3, [
+        self._build_col_buttons(upper_half, [
             ("Extract", self._do_extract_public),
+        ])
+
+        # Lower Half: Search & Extract Section
+        lower_half = tk.Frame(col3, bg=COLORS["panel"])
+        lower_half.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True, pady=(4, 0))
+
+        self._search_panel = ChecklistPanel(
+            lower_half, "Search Files (All)", self._fetch_files
+        )
+        self._search_panel.pack(fill=tk.BOTH, expand=True)
+
+        self._build_col_buttons(lower_half, [
+            ("Extract", self._do_extract_files),
         ])
 
     def _build_tool_row(self, parent, label: str, pref_key: str,
@@ -616,6 +647,12 @@ class ADBExtractorApp(tk.Tk):
 
     def _fetch_public(self) -> list[str]:
         return list_public_packages()
+
+    def _fetch_files(self, query: str) -> list[str]:
+        q = query.strip()
+        if not q or len(q) < 2:
+            return []
+        return find_files_on_device(q)
 
     def _populate_all(self) -> None:
         self._private_panel.populate()
@@ -710,6 +747,7 @@ class ADBExtractorApp(tk.Tk):
         self._private_panel.set_enabled(enabled)
         self._apk_panel.set_enabled(enabled)
         self._public_panel.set_enabled(enabled)
+        self._search_panel.set_enabled(enabled)
 
     def _on_task_finish(self) -> None:
         self._task_running = False
@@ -862,6 +900,19 @@ class ADBExtractorApp(tk.Tk):
                 self.after(0, lambda: show_custom_error("Error", str(e), parent=self))
 
         self._run_async(task)
+
+    # ------------------------------------------------------------------
+    # Action handlers — Search Section
+    # ------------------------------------------------------------------
+
+    def _do_extract_files(self) -> None:
+        selected = self._search_panel.get_selected()
+        if not selected:
+            show_custom_warning("Nothing selected",
+                                "Please select at least one file from Search Results.", parent=self)
+            return
+        self._status.set(f"Extracting {len(selected)} search file(s)…", busy=True)
+        self._run_async(extract_files_from_device, selected, self._output_var.get() or None)
 
     # ------------------------------------------------------------------
     # Lifecycle

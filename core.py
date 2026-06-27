@@ -262,6 +262,72 @@ def get_last_log_line() -> str:
 # Device listing helpers (used by the GUI to populate checklists)
 # ---------------------------------------------------------------------------
 
+def find_files_on_device(query: str) -> list[str]:
+    """Find all files on the device matching the query string under /data and /sdcard."""
+    if not query:
+        return []
+    cmd = f"find /data /sdcard -name '*{query}*' 2>/dev/null"
+    log(f"Searching for files matching '{query}': {cmd}")
+    result = adb_shell_su(cmd)
+    if result:
+        return sorted(line.strip() for line in result.split("\n") if line.strip())
+    return []
+
+
+def extract_files_from_device(selected: list[str], output_path: str | None) -> str | None:
+    """
+    Extract selected files/folders from the device to the PC using root tar streaming.
+    Recreates the directory structure locally and bypasses permission restrictions.
+    """
+    if not selected:
+        return None
+
+    folder_name = f"search_extraction_{_timestamp()}"
+    base = output_path if output_path else get_cwd()
+    local_dir = os.path.join(base, folder_name)
+    os.makedirs(local_dir, exist_ok=True)
+
+    local_archive = os.path.join(local_dir, "search_extract.tar")
+    adb_cmd = f"adb -s {CURRENT_DEVICE}" if CURRENT_DEVICE else "adb"
+
+    # Quote each path to handle spaces or special characters safely
+    quoted_paths = " ".join(f"'{p}'" for p in selected)
+
+    # Stream the tar archive directly from the phone to the PC using su for root access
+    cmd = f'{adb_cmd} exec-out su -c "stty raw 2>/dev/null; tar -cf - {quoted_paths} 2>/dev/null" > "{local_archive}"'
+    log(f"Streaming searched files to local tar: {cmd}")
+    shell_local(cmd)
+
+    if is_cancelled():
+        import shutil
+        if os.path.exists(local_dir):
+            try:
+                shutil.rmtree(local_dir)
+            except OSError:
+                pass
+        log("Search file extraction cancelled: cleaned up local files.")
+        return None
+
+    # Extract locally on the PC
+    if os.path.exists(local_archive) and os.path.getsize(local_archive) > 0:
+        log(f"Extracting local search tar: {local_archive}")
+        extract_cmd = f'tar -xf "{local_archive}" -C "{local_dir}"'
+        shell_local(extract_cmd)
+        try:
+            os.remove(local_archive)
+        except OSError:
+            pass
+        log(f"Search file extraction complete -> {local_dir}")
+        return local_dir
+    else:
+        try:
+            os.remove(local_archive)
+        except OSError:
+            pass
+        log("Search file extraction failed: no data received or file not found.")
+        return None
+
+
 def list_private_packages() -> list[str]:
     """Return sorted list of package names under /data/data/."""
     result = adb_shell_su("ls /data/data/")
