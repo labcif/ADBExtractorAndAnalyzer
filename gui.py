@@ -26,6 +26,9 @@ from core import (
     save_prefs,
     full_device_dump,
     get_last_log_line,
+    set_current_device,
+    get_current_device,
+    list_adb_devices,
 )
 
 
@@ -73,8 +76,22 @@ def _style_button(btn: tk.Button) -> None:
         padx=8,
         pady=4,
     )
-    btn.bind("<Enter>", lambda e: btn.config(bg=COLORS["highlight"]))
-    btn.bind("<Leave>", lambda e: btn.config(bg=COLORS["button"]))
+    def on_enter(e):
+        if btn.cget("state") != tk.DISABLED:
+            btn.config(bg=COLORS["highlight"])
+    def on_leave(e):
+        if btn.cget("state") != tk.DISABLED:
+            btn.config(bg=COLORS["button"])
+            
+    btn.bind("<Enter>", on_enter)
+    btn.bind("<Leave>", on_leave)
+
+
+def _set_button_state(btn: tk.Button, enabled: bool) -> None:
+    if enabled:
+        btn.config(state=tk.NORMAL, bg=COLORS["button"], fg=COLORS["text"])
+    else:
+        btn.config(state=tk.DISABLED, bg=COLORS["accent"], fg=COLORS["text_dim"])
 
 
 def _style_entry(entry: tk.Entry) -> None:
@@ -121,15 +138,15 @@ class ChecklistPanel(tk.Frame):
         _style_button(self._toggle_btn)
         self._toggle_btn.pack(side=tk.RIGHT, padx=2)
 
-        apply_btn = tk.Button(header, text="Filter ▶", command=self.populate)
-        _style_button(apply_btn)
-        apply_btn.pack(side=tk.RIGHT, padx=2)
+        self._apply_btn = tk.Button(header, text="Filter ▶", command=self.populate)
+        _style_button(self._apply_btn)
+        self._apply_btn.pack(side=tk.RIGHT, padx=2)
 
         self._filter_var = tk.StringVar()
-        filter_entry = tk.Entry(header, textvariable=self._filter_var, width=16)
-        _style_entry(filter_entry)
-        filter_entry.pack(side=tk.RIGHT, padx=4)
-        filter_entry.bind("<Return>", lambda e: self.populate())
+        self._filter_entry = tk.Entry(header, textvariable=self._filter_var, width=16)
+        _style_entry(self._filter_entry)
+        self._filter_entry.pack(side=tk.RIGHT, padx=4)
+        self._filter_entry.bind("<Return>", lambda e: self.populate())
 
         tk.Label(header, text="Filter:", bg=COLORS["panel"],
                 fg=COLORS["text_dim"], font=FONTS["label"]).pack(side=tk.RIGHT)
@@ -217,16 +234,45 @@ class ChecklistPanel(tk.Frame):
 
 
     def populate(self) -> None:
+        # Clear existing widgets
         for widget in self._inner_frame.winfo_children():
             widget.destroy()
         self._vars.clear()
 
-        filt = self._filter_var.get().strip().lower()
-        items = self._fetch_items()
-        if not items:
-            self._count_label.config(text="0 items")
+        # Show loading indicator
+        loading_label = tk.Label(
+            self._inner_frame,
+            text="Loading packages from device...",
+            bg=COLORS["entry_bg"],
+            fg=COLORS["text_dim"],
+            font=FONTS["label"]
+        )
+        loading_label.pack(pady=10, fill=tk.X)
+        self._count_label.config(text="Loading...")
+
+        # Run fetch in background
+        def worker():
+            try:
+                items = self._fetch_items()
+            except Exception as e:
+                log(f"Error fetching items: {e}")
+                items = None
+            
+            # Update UI on main thread
+            self.after(0, lambda: self._on_fetch_complete(items, loading_label))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_fetch_complete(self, items: list[str] | None, loading_label: tk.Label) -> None:
+        # Destroy the loading label if it exists
+        if loading_label.winfo_exists():
+            loading_label.destroy()
+
+        if items is None:
+            self._count_label.config(text="Error loading items")
             return
 
+        filt = self._filter_var.get().strip().lower()
         visible = [line for line in items if not filt or filt in line.lower()]
         self._count_label.config(text=f"{len(visible)} items")
 
@@ -235,7 +281,7 @@ class ChecklistPanel(tk.Frame):
             self._vars[item] = var
 
             cb = tk.Checkbutton(
-                self._inner_frame,   # 👈 changed from self._canvas
+                self._inner_frame,
                 text=item,
                 variable=var,
                 bg=COLORS["entry_bg"],
@@ -257,11 +303,17 @@ class ChecklistPanel(tk.Frame):
         for var in self._vars.values():
             var.set(value)
 
+    def set_enabled(self, enabled: bool) -> None:
+        _set_button_state(self._toggle_btn, enabled)
+        _set_button_state(self._apply_btn, enabled)
+        state = tk.NORMAL if enabled else tk.DISABLED
+        self._filter_entry.config(state=state)
+
 
 class StatusBar(tk.Frame):
-    """Bottom status bar with a text label and an indeterminate progress bar."""
+    """Bottom status bar with a text label, cancel button, and progress bar."""
 
-    def __init__(self, parent, **kwargs):
+    def __init__(self, parent, cancel_cmd=None, **kwargs):
         super().__init__(parent, bg=COLORS["accent"], height=28, **kwargs)
         self.pack_propagate(False)
 
@@ -308,12 +360,19 @@ class StatusBar(tk.Frame):
         self._progress = ttk.Progressbar(right, mode="indeterminate", length=120)
         self._progress.pack(side=tk.RIGHT, pady=4)
 
+        self._cancel_btn = tk.Button(right, text="✖ Cancel", command=cancel_cmd)
+        _style_button(self._cancel_btn)
+        self._cancel_btn.pack(side=tk.RIGHT, padx=(0, 10), pady=2)
+        _set_button_state(self._cancel_btn, False)
+
     def set(self, msg: str, busy: bool = False) -> None:
         self._msg.set(msg)
         if busy:
             self._progress.start(10)
+            _set_button_state(self._cancel_btn, True)
         else:
             self._progress.stop()
+            _set_button_state(self._cancel_btn, False)
     
     def _truncate(self, text: str, limit: int = 80) -> str:
         text = text.strip()
@@ -343,10 +402,15 @@ class ADBExtractorApp(tk.Tk):
 
         self._prefs = load_prefs()
         self._apk_dir_map: dict[str, str] = {}
+        self._disableable_buttons: list[tk.Button] = []
+        self._task_running = False
 
         self._build_styles()
         self._build_ui()
-        self._populate_all()
+        
+        # Prompt device selection at startup
+        self._prompt_device_selection_startup()
+        self._start_device_monitor()
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -397,10 +461,6 @@ class ADBExtractorApp(tk.Tk):
             font=FONTS["title"]
         ).pack(side=tk.LEFT)
 
-        # dump_btn = tk.Button(hdr, text="Full Dump", command=self._do_full_dump)
-        # _style_button(dump_btn)
-        # dump_btn.pack(side=tk.RIGHT, padx=4, pady=6)
-
         out_frame = tk.Frame(hdr, bg=COLORS["accent"])
         out_frame.pack(side=tk.RIGHT, padx=10)
 
@@ -412,9 +472,32 @@ class ADBExtractorApp(tk.Tk):
         _style_entry(out_entry)
         out_entry.pack(side=tk.LEFT, padx=4)
 
-        btn = tk.Button(out_frame, text="Browse…", command=self._browse_output)
-        _style_button(btn)
-        btn.pack(side=tk.LEFT, padx=4)
+        self._browse_btn = tk.Button(out_frame, text="Browse…", command=self._browse_output)
+        _style_button(self._browse_btn)
+        self._browse_btn.pack(side=tk.LEFT, padx=4)
+        self._disableable_buttons.append(self._browse_btn)
+
+        # Device selection section in header
+        dev_frame = tk.Frame(hdr, bg=COLORS["accent"])
+        dev_frame.pack(side=tk.RIGHT, padx=(10, 20))
+
+        tk.Label(dev_frame, text="Device:", bg=COLORS["accent"],
+                 fg=COLORS["text_dim"], font=FONTS["label"]).pack(side=tk.LEFT, padx=4)
+
+        self._device_label_var = tk.StringVar(value="None")
+        self._device_label = tk.Label(dev_frame, textvariable=self._device_label_var, bg=COLORS["accent"],
+                                     fg=COLORS["text_dim"], font=FONTS["section"])
+        self._device_label.pack(side=tk.LEFT, padx=4)
+
+        self._change_btn = tk.Button(dev_frame, text="Change…", command=self._change_device_runtime)
+        _style_button(self._change_btn)
+        self._change_btn.pack(side=tk.LEFT, padx=4)
+        self._disableable_buttons.append(self._change_btn)
+
+        self._dump_btn = tk.Button(dev_frame, text="Full Dump", command=self._do_full_dump)
+        _style_button(self._dump_btn)
+        self._dump_btn.pack(side=tk.LEFT, padx=(12, 4))
+        self._disableable_buttons.append(self._dump_btn)
 
     def _build_columns(self) -> None:
         body = tk.Frame(self, bg=COLORS["bg"])
@@ -485,6 +568,7 @@ class ADBExtractorApp(tk.Tk):
         btn = tk.Button(row, text="Browse…", command=browse_cmd)
         _style_button(btn)
         btn.pack(side=tk.LEFT)
+        self._disableable_buttons.append(btn)
 
     def _build_mobsf_row(self, parent) -> None:
         row = tk.Frame(parent, bg=COLORS["panel"])
@@ -509,9 +593,10 @@ class ADBExtractorApp(tk.Tk):
             btn = tk.Button(row, text=label, command=cmd)
             _style_button(btn)
             btn.pack(side=tk.LEFT, padx=3, pady=2)
+            self._disableable_buttons.append(btn)
 
     def _build_status(self) -> None:
-        self._status = StatusBar(self)
+        self._status = StatusBar(self, cancel_cmd=self._cancel_current_task)
         self._status.pack(fill=tk.X, side=tk.BOTTOM)
 
     # ------------------------------------------------------------------
@@ -576,18 +661,79 @@ class ADBExtractorApp(tk.Tk):
 
         self.after(500, self._poll_log_file)
 
+    def _start_device_monitor(self) -> None:
+        self._check_device_connectivity()
+
+    def _check_device_connectivity(self) -> None:
+        device = get_current_device()
+        if not device or device == "None":
+            self._device_label_var.set("None")
+            self._device_label.config(fg=COLORS["text_dim"])
+            self.after(3000, self._check_device_connectivity)
+            return
+
+        def worker():
+            try:
+                devices = list_adb_devices()
+                connected = (device in devices)
+            except Exception:
+                connected = False
+
+            # Update UI on main thread
+            self.after(0, lambda: self._update_device_status_ui(device, connected))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _update_device_status_ui(self, device: str, connected: bool) -> None:
+        if connected:
+            self._device_label_var.set(device)
+            self._device_label.config(fg=COLORS["success"])
+        else:
+            self._device_label_var.set(f"{device} (Offline)")
+            self._device_label.config(fg=COLORS["warning"])
+        
+        self.after(3000, self._check_device_connectivity)
+
+    def _cancel_current_task(self) -> None:
+        from core import cancel_active_tasks
+        log("User requested cancellation of the running task.")
+        cancel_active_tasks()
+        self._status.set("Cancelling task…", busy=True)
+
+    def _update_ui_state(self) -> None:
+        enabled = not self._task_running
+        for btn in self._disableable_buttons:
+            _set_button_state(btn, enabled)
+        
+        self._private_panel.set_enabled(enabled)
+        self._apk_panel.set_enabled(enabled)
+        self._public_panel.set_enabled(enabled)
+
+    def _on_task_finish(self) -> None:
+        self._task_running = False
+        self._update_ui_state()
+
     def _run_async(self, fn, *args) -> None:
+        from core import set_cancelled
+        set_cancelled(False)
+        self._task_running = True
+        self._update_ui_state()
         self._start_log_monitor()
 
         def wrapper():
             try:
                 fn(*args)
             except Exception as e:
-                log(f"Unhandled error in background task: {e}")
-                self.after(0, lambda: messagebox.showerror("Error", str(e)))
+                from core import is_cancelled
+                if not is_cancelled():
+                    log(f"Unhandled error in background task: {e}")
+                    self.after(0, lambda: messagebox.showerror("Error", str(e)))
+                else:
+                    log(f"Background task exception suppressed due to cancellation: {e}")
             finally:
                 self.after(0, lambda: self._status.set("Ready", busy=False))
                 self.after(0, self._stop_log_monitor)
+                self.after(0, self._on_task_finish)
 
         threading.Thread(target=wrapper, daemon=True).start()
 
@@ -696,11 +842,19 @@ class ADBExtractorApp(tk.Tk):
     # ------------------------------------------------------------------
 
     def _do_full_dump(self) -> None:
+        if not get_current_device():
+            messagebox.showwarning("No Device", "Please select a device before performing a full dump.")
+            return
+
         self._status.set("Creating full device dump…", busy=True)
 
         def task():
             try:
-                full_device_dump(self._output_var.get() or None)
+                res = full_device_dump(self._output_var.get() or None)
+                if res:
+                    self.after(0, lambda: messagebox.showinfo("Success", f"Full dump completed successfully!\nSaved to: {res}"))
+                else:
+                    self.after(0, lambda: messagebox.showerror("Error", "Full dump failed. Check logs.txt for details."))
             except Exception as e:
                 log(f"Full dump failed: {e}")
                 self.after(0, lambda: messagebox.showerror("Error", str(e)))
@@ -718,4 +872,192 @@ class ADBExtractorApp(tk.Tk):
             "jadx_path":      self._jadx_path_var.get(),
             "mobsf_endpoint": self._mobsf_var.get(),
         })
+        self.destroy()
+
+    def _prompt_device_selection_startup(self) -> None:
+        devices = list_adb_devices()
+        if len(devices) == 1:
+            device = devices[0]
+            set_current_device(device)
+            self._device_label_var.set(device)
+            self._device_label.config(fg=COLORS["success"])
+            log(f"Auto-selected sole device at startup: {device}")
+            self._populate_all()
+        else:
+            dialog = DeviceSelectorDialog(self, is_startup=True)
+            self.wait_window(dialog)
+            
+            if dialog.selected_device:
+                set_current_device(dialog.selected_device)
+                self._device_label_var.set(dialog.selected_device)
+                self._device_label.config(fg=COLORS["success"])
+                log(f"Device selected at startup: {dialog.selected_device}")
+            else:
+                set_current_device(None)
+                self._device_label_var.set("None")
+                self._device_label.config(fg=COLORS["text_dim"])
+                log("No device selected at startup.")
+                
+            self._populate_all()
+
+    def _change_device_runtime(self) -> None:
+        dialog = DeviceSelectorDialog(self, is_startup=False)
+        self.wait_window(dialog)
+        
+        if dialog.selected_device:
+            if dialog.selected_device == "None":
+                set_current_device(None)
+                self._device_label_var.set("None")
+                self._device_label.config(fg=COLORS["text_dim"])
+                log("Device cleared / disconnected at runtime.")
+            else:
+                set_current_device(dialog.selected_device)
+                self._device_label_var.set(dialog.selected_device)
+                self._device_label.config(fg=COLORS["success"])
+                log(f"Device changed at runtime to: {dialog.selected_device}")
+            self._populate_all()
+
+
+# ---------------------------------------------------------------------------
+# Device Selector Dialog
+# ---------------------------------------------------------------------------
+
+class DeviceSelectorDialog(tk.Toplevel):
+    def __init__(self, parent, is_startup=False):
+        super().__init__(parent, bg=COLORS["bg"])
+        self.title("Select Android Device")
+        self.geometry("450x260")
+        self.resizable(False, False)
+        
+        # Center the window relative to the parent
+        self.update_idletasks()
+        parent_x = parent.winfo_x()
+        parent_y = parent.winfo_y()
+        parent_w = parent.winfo_width()
+        parent_h = parent.winfo_height()
+        
+        if parent_w < 100 or parent_h < 100:
+            parent_w = parent.winfo_screenwidth()
+            parent_h = parent.winfo_screenheight()
+            parent_x = 0
+            parent_y = 0
+            
+        x = parent_x + (parent_w - 450) // 2
+        y = parent_y + (parent_h - 260) // 2
+        self.geometry(f"+{x}+{y}")
+        
+        self.transient(parent)
+        self.grab_set()
+        
+        self.parent = parent
+        self.is_startup = is_startup
+        self.selected_device = None
+        
+        self._build_ui()
+        self._refresh_devices()
+        
+    def _build_ui(self):
+        hdr = tk.Frame(self, bg=COLORS["panel"], height=50)
+        hdr.pack(fill=tk.X)
+        hdr.pack_propagate(False)
+        
+        lbl = tk.Label(
+            hdr,
+            text="DEVICE SELECTOR",
+            bg=COLORS["panel"],
+            fg=COLORS["highlight"],
+            font=FONTS["section"]
+        )
+        lbl.pack(pady=12)
+        
+        body = tk.Frame(self, bg=COLORS["bg"], padx=20, pady=15)
+        body.pack(fill=tk.BOTH, expand=True)
+        
+        desc = tk.Label(
+            body,
+            text="Select an available Android device (physical/emulator):",
+            bg=COLORS["bg"],
+            fg=COLORS["text"],
+            font=FONTS["label"],
+            anchor="w"
+        )
+        desc.pack(fill=tk.X, pady=(0, 10))
+        
+        drop_frame = tk.Frame(body, bg=COLORS["bg"])
+        drop_frame.pack(fill=tk.X, pady=10)
+        
+        self._dev_var = tk.StringVar()
+        self._dev_menu = ttk.Combobox(
+            drop_frame,
+            textvariable=self._dev_var,
+            state="readonly",
+            font=FONTS["label"],
+            width=25
+        )
+        self._dev_menu.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+        
+        refresh_btn = tk.Button(drop_frame, text="↻ Refresh", command=self._refresh_devices)
+        _style_button(refresh_btn)
+        refresh_btn.pack(side=tk.RIGHT)
+        
+        footer = tk.Frame(self, bg=COLORS["bg"], pady=15, padx=20)
+        footer.pack(fill=tk.X, side=tk.BOTTOM)
+        
+        select_btn = tk.Button(footer, text="Select Device", command=self._on_select)
+        _style_button(select_btn)
+        select_btn.pack(side=tk.RIGHT, padx=(10, 0))
+        
+        if self.is_startup:
+            cancel_btn = tk.Button(footer, text="Run Without Device", command=self.destroy)
+            _style_button(cancel_btn)
+            cancel_btn.pack(side=tk.RIGHT)
+        else:
+            disconnect_btn = tk.Button(footer, text="Disconnect", command=self._on_disconnect)
+            _style_button(disconnect_btn)
+            disconnect_btn.pack(side=tk.RIGHT, padx=(0, 10))
+            
+            cancel_btn = tk.Button(footer, text="Cancel", command=self.destroy)
+            _style_button(cancel_btn)
+            cancel_btn.pack(side=tk.RIGHT)
+        
+    def _refresh_devices(self):
+        self._dev_menu.config(values=[])
+        self._dev_var.set("Refreshing...")
+
+        def worker():
+            try:
+                devices = list_adb_devices()
+            except Exception:
+                devices = []
+
+            self.after(0, lambda: self._on_refresh_complete(devices))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_refresh_complete(self, devices: list[str]):
+        if devices:
+            self._dev_menu.config(values=devices)
+            current = get_current_device()
+            if current in devices:
+                self._dev_menu.set(current)
+            else:
+                self._dev_menu.set(devices[0])
+        else:
+            self._dev_menu.config(values=[])
+            self._dev_var.set("No devices found")
+            
+    def _on_select(self):
+        val = self._dev_var.get()
+        if val and val != "No devices found":
+            self.selected_device = val
+            self.destroy()
+        else:
+            messagebox.showwarning(
+                "No Device Selected",
+                "Please connect a device and click Refresh, or run without a device.",
+                parent=self
+            )
+
+    def _on_disconnect(self):
+        self.selected_device = "None"
         self.destroy()
