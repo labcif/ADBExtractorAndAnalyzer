@@ -4,9 +4,10 @@ Theme constants, reusable UI components (ChecklistPanel, StatusBar),
 and the main ADBExtractorApp window class.
 """
 
+import os
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import ttk
 from PIL import Image, ImageTk
 
 
@@ -26,6 +27,11 @@ from core import (
     save_prefs,
     full_device_dump,
     get_last_log_line,
+    set_current_device,
+    get_current_device,
+    list_adb_devices,
+    find_files_on_device,
+    extract_files_from_device,
 )
 
 
@@ -73,14 +79,29 @@ def _style_button(btn: tk.Button) -> None:
         padx=8,
         pady=4,
     )
-    btn.bind("<Enter>", lambda e: btn.config(bg=COLORS["highlight"]))
-    btn.bind("<Leave>", lambda e: btn.config(bg=COLORS["button"]))
+    def on_enter(e):
+        if btn.cget("state") != tk.DISABLED:
+            btn.config(bg=COLORS["highlight"])
+    def on_leave(e):
+        if btn.cget("state") != tk.DISABLED:
+            btn.config(bg=COLORS["button"])
+            
+    btn.bind("<Enter>", on_enter)
+    btn.bind("<Leave>", on_leave)
+
+
+def _set_button_state(btn: tk.Button, enabled: bool) -> None:
+    if enabled:
+        btn.config(state=tk.NORMAL, bg=COLORS["button"], fg=COLORS["text"])
+    else:
+        btn.config(state=tk.DISABLED, bg=COLORS["accent"], fg=COLORS["text_dim"])
 
 
 def _style_entry(entry: tk.Entry) -> None:
     entry.config(
         bg=COLORS["entry_bg"],
         fg=COLORS["text"],
+        readonlybackground=COLORS["entry_bg"],
         insertbackground=COLORS["highlight"],
         relief=tk.FLAT,
         font=FONTS["label"],
@@ -104,6 +125,7 @@ class ChecklistPanel(tk.Frame):
 
     def __init__(self, parent, title: str, fetch_items, **kwargs):
         super().__init__(parent, bg=COLORS["panel"], **kwargs)
+        self._title = title
         self._fetch_items = fetch_items
         self._vars: dict[str, tk.IntVar] = {}
         self._build(title)
@@ -121,15 +143,15 @@ class ChecklistPanel(tk.Frame):
         _style_button(self._toggle_btn)
         self._toggle_btn.pack(side=tk.RIGHT, padx=2)
 
-        apply_btn = tk.Button(header, text="Filter ▶", command=self.populate)
-        _style_button(apply_btn)
-        apply_btn.pack(side=tk.RIGHT, padx=2)
+        self._apply_btn = tk.Button(header, text="Filter ▶", command=self.populate)
+        _style_button(self._apply_btn)
+        self._apply_btn.pack(side=tk.RIGHT, padx=2)
 
         self._filter_var = tk.StringVar()
-        filter_entry = tk.Entry(header, textvariable=self._filter_var, width=16)
-        _style_entry(filter_entry)
-        filter_entry.pack(side=tk.RIGHT, padx=4)
-        filter_entry.bind("<Return>", lambda e: self.populate())
+        self._filter_entry = tk.Entry(header, textvariable=self._filter_var, width=16)
+        _style_entry(self._filter_entry)
+        self._filter_entry.pack(side=tk.RIGHT, padx=4)
+        self._filter_entry.bind("<Return>", lambda e: self.populate())
 
         tk.Label(header, text="Filter:", bg=COLORS["panel"],
                 fg=COLORS["text_dim"], font=FONTS["label"]).pack(side=tk.RIGHT)
@@ -217,16 +239,56 @@ class ChecklistPanel(tk.Frame):
 
 
     def populate(self) -> None:
+        # Clear existing widgets
         for widget in self._inner_frame.winfo_children():
             widget.destroy()
         self._vars.clear()
 
-        filt = self._filter_var.get().strip().lower()
-        items = self._fetch_items()
-        if not items:
-            self._count_label.config(text="0 items")
+        # Show loading indicator
+        loading_text = "Searching files on device..." if "Search" in getattr(self, "_title", "") else "Loading packages from device..."
+        loading_label = tk.Label(
+            self._inner_frame,
+            text=loading_text,
+            bg=COLORS["entry_bg"],
+            fg=COLORS["text_dim"],
+            font=FONTS["label"]
+        )
+        loading_label.pack(pady=10, fill=tk.X)
+        self._count_label.config(text="Loading...")
+
+        # Run fetch in background
+        def worker():
+            try:
+                import inspect
+                sig = inspect.signature(self._fetch_items)
+                has_args = len(sig.parameters) > 0
+            except Exception:
+                has_args = False
+
+            try:
+                if has_args:
+                    items = self._fetch_items(self._filter_var.get())
+                else:
+                    items = self._fetch_items()
+            except Exception as e:
+                log(f"Error fetching items: {e}")
+                items = None
+            
+            # Update UI on main thread
+            self.after(0, lambda: self._on_fetch_complete(items, loading_label))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_fetch_complete(self, items: list[str] | None, loading_label: tk.Label) -> None:
+        # Destroy the loading label if it exists
+        if loading_label.winfo_exists():
+            loading_label.destroy()
+
+        if items is None:
+            self._count_label.config(text="Error loading items")
             return
 
+        filt = self._filter_var.get().strip().lower()
         visible = [line for line in items if not filt or filt in line.lower()]
         self._count_label.config(text=f"{len(visible)} items")
 
@@ -235,7 +297,7 @@ class ChecklistPanel(tk.Frame):
             self._vars[item] = var
 
             cb = tk.Checkbutton(
-                self._inner_frame,   # 👈 changed from self._canvas
+                self._inner_frame,
                 text=item,
                 variable=var,
                 bg=COLORS["entry_bg"],
@@ -257,11 +319,17 @@ class ChecklistPanel(tk.Frame):
         for var in self._vars.values():
             var.set(value)
 
+    def set_enabled(self, enabled: bool) -> None:
+        _set_button_state(self._toggle_btn, enabled)
+        _set_button_state(self._apply_btn, enabled)
+        state = tk.NORMAL if enabled else tk.DISABLED
+        self._filter_entry.config(state=state)
+
 
 class StatusBar(tk.Frame):
-    """Bottom status bar with a text label and an indeterminate progress bar."""
+    """Bottom status bar with a text label, cancel button, and progress bar."""
 
-    def __init__(self, parent, **kwargs):
+    def __init__(self, parent, cancel_cmd=None, **kwargs):
         super().__init__(parent, bg=COLORS["accent"], height=28, **kwargs)
         self.pack_propagate(False)
 
@@ -308,12 +376,19 @@ class StatusBar(tk.Frame):
         self._progress = ttk.Progressbar(right, mode="indeterminate", length=120)
         self._progress.pack(side=tk.RIGHT, pady=4)
 
+        self._cancel_btn = tk.Button(right, text="✖ Cancel", command=cancel_cmd)
+        _style_button(self._cancel_btn)
+        self._cancel_btn.pack(side=tk.RIGHT, padx=(0, 10), pady=2)
+        _set_button_state(self._cancel_btn, False)
+
     def set(self, msg: str, busy: bool = False) -> None:
         self._msg.set(msg)
         if busy:
             self._progress.start(10)
+            _set_button_state(self._cancel_btn, True)
         else:
             self._progress.stop()
+            _set_button_state(self._cancel_btn, False)
     
     def _truncate(self, text: str, limit: int = 80) -> str:
         text = text.strip()
@@ -343,10 +418,15 @@ class ADBExtractorApp(tk.Tk):
 
         self._prefs = load_prefs()
         self._apk_dir_map: dict[str, str] = {}
+        self._disableable_buttons: list[tk.Button] = []
+        self._task_running = False
 
         self._build_styles()
         self._build_ui()
-        self._populate_all()
+        
+        # Prompt device selection at startup
+        self._prompt_device_selection_startup()
+        self._start_device_monitor()
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -397,10 +477,6 @@ class ADBExtractorApp(tk.Tk):
             font=FONTS["title"]
         ).pack(side=tk.LEFT)
 
-        # dump_btn = tk.Button(hdr, text="Full Dump", command=self._do_full_dump)
-        # _style_button(dump_btn)
-        # dump_btn.pack(side=tk.RIGHT, padx=4, pady=6)
-
         out_frame = tk.Frame(hdr, bg=COLORS["accent"])
         out_frame.pack(side=tk.RIGHT, padx=10)
 
@@ -412,9 +488,32 @@ class ADBExtractorApp(tk.Tk):
         _style_entry(out_entry)
         out_entry.pack(side=tk.LEFT, padx=4)
 
-        btn = tk.Button(out_frame, text="Browse…", command=self._browse_output)
-        _style_button(btn)
-        btn.pack(side=tk.LEFT, padx=4)
+        self._browse_btn = tk.Button(out_frame, text="Browse…", command=self._browse_output)
+        _style_button(self._browse_btn)
+        self._browse_btn.pack(side=tk.LEFT, padx=4)
+        self._disableable_buttons.append(self._browse_btn)
+
+        # Device selection section in header
+        dev_frame = tk.Frame(hdr, bg=COLORS["accent"])
+        dev_frame.pack(side=tk.RIGHT, padx=(10, 20))
+
+        tk.Label(dev_frame, text="Device:", bg=COLORS["accent"],
+                 fg=COLORS["text_dim"], font=FONTS["label"]).pack(side=tk.LEFT, padx=4)
+
+        self._device_label_var = tk.StringVar(value="None")
+        self._device_label = tk.Label(dev_frame, textvariable=self._device_label_var, bg=COLORS["accent"],
+                                     fg=COLORS["text_dim"], font=FONTS["section"])
+        self._device_label.pack(side=tk.LEFT, padx=4)
+
+        self._change_btn = tk.Button(dev_frame, text="Change…", command=self._change_device_runtime)
+        _style_button(self._change_btn)
+        self._change_btn.pack(side=tk.LEFT, padx=4)
+        self._disableable_buttons.append(self._change_btn)
+
+        self._dump_btn = tk.Button(dev_frame, text="Full Dump", command=self._do_full_dump)
+        _style_button(self._dump_btn)
+        self._dump_btn.pack(side=tk.LEFT, padx=(12, 4))
+        self._disableable_buttons.append(self._dump_btn)
 
     def _build_columns(self) -> None:
         body = tk.Frame(self, bg=COLORS["bg"])
@@ -454,17 +553,34 @@ class ADBExtractorApp(tk.Tk):
             ("Extract & Decompile (JADX)", self._do_extract_and_jadx),
         ])
 
-        # Column 3 — Public Data
+        # Column 3 — Public Data & Search Section
         col3 = tk.Frame(body, bg=COLORS["panel"])
         col3.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4)
 
+        # Upper Half: Public Data
+        upper_half = tk.Frame(col3, bg=COLORS["panel"])
+        upper_half.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(0, 4))
+
         self._public_panel = ChecklistPanel(
-            col3, "Public Data  /sdcard/Android/data/", self._fetch_public
+            upper_half, "Public Data  /sdcard/Android/data/", self._fetch_public
         )
         self._public_panel.pack(fill=tk.BOTH, expand=True)
 
-        self._build_col_buttons(col3, [
+        self._build_col_buttons(upper_half, [
             ("Extract", self._do_extract_public),
+        ])
+
+        # Lower Half: Search & Extract Section
+        lower_half = tk.Frame(col3, bg=COLORS["panel"])
+        lower_half.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True, pady=(4, 0))
+
+        self._search_panel = ChecklistPanel(
+            lower_half, "Search Files (All)", self._fetch_files
+        )
+        self._search_panel.pack(fill=tk.BOTH, expand=True)
+
+        self._build_col_buttons(lower_half, [
+            ("Extract", self._do_extract_files),
         ])
 
     def _build_tool_row(self, parent, label: str, pref_key: str,
@@ -485,6 +601,7 @@ class ADBExtractorApp(tk.Tk):
         btn = tk.Button(row, text="Browse…", command=browse_cmd)
         _style_button(btn)
         btn.pack(side=tk.LEFT)
+        self._disableable_buttons.append(btn)
 
     def _build_mobsf_row(self, parent) -> None:
         row = tk.Frame(parent, bg=COLORS["panel"])
@@ -509,9 +626,10 @@ class ADBExtractorApp(tk.Tk):
             btn = tk.Button(row, text=label, command=cmd)
             _style_button(btn)
             btn.pack(side=tk.LEFT, padx=3, pady=2)
+            self._disableable_buttons.append(btn)
 
     def _build_status(self) -> None:
-        self._status = StatusBar(self)
+        self._status = StatusBar(self, cancel_cmd=self._cancel_current_task)
         self._status.pack(fill=tk.X, side=tk.BOTTOM)
 
     # ------------------------------------------------------------------
@@ -530,6 +648,12 @@ class ADBExtractorApp(tk.Tk):
     def _fetch_public(self) -> list[str]:
         return list_public_packages()
 
+    def _fetch_files(self, query: str) -> list[str]:
+        q = query.strip()
+        if not q or len(q) < 2:
+            return []
+        return find_files_on_device(q)
+
     def _populate_all(self) -> None:
         self._private_panel.populate()
         self._apk_panel.populate()
@@ -540,17 +664,17 @@ class ADBExtractorApp(tk.Tk):
     # ------------------------------------------------------------------
 
     def _browse_output(self) -> None:
-        path = filedialog.askdirectory()
+        path = ask_custom_directory(self)
         if path:
             self._output_var.set(path)
 
     def _browse_aleapp(self) -> None:
-        path = filedialog.askopenfilename()
+        path = ask_custom_openfilename(self)
         if path:
             self._aleapp_path_var.set(path)
 
     def _browse_jadx(self) -> None:
-        path = filedialog.askopenfilename()
+        path = ask_custom_openfilename(self)
         if path:
             self._jadx_path_var.set(path)
 
@@ -576,18 +700,80 @@ class ADBExtractorApp(tk.Tk):
 
         self.after(500, self._poll_log_file)
 
+    def _start_device_monitor(self) -> None:
+        self._check_device_connectivity()
+
+    def _check_device_connectivity(self) -> None:
+        device = get_current_device()
+        if not device or device == "None":
+            self._device_label_var.set("None")
+            self._device_label.config(fg=COLORS["text_dim"])
+            self.after(3000, self._check_device_connectivity)
+            return
+
+        def worker():
+            try:
+                devices = list_adb_devices()
+                connected = (device in devices)
+            except Exception:
+                connected = False
+
+            # Update UI on main thread
+            self.after(0, lambda: self._update_device_status_ui(device, connected))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _update_device_status_ui(self, device: str, connected: bool) -> None:
+        if connected:
+            self._device_label_var.set(device)
+            self._device_label.config(fg=COLORS["success"])
+        else:
+            self._device_label_var.set(f"{device} (Offline)")
+            self._device_label.config(fg=COLORS["warning"])
+        
+        self.after(3000, self._check_device_connectivity)
+
+    def _cancel_current_task(self) -> None:
+        from core import cancel_active_tasks
+        log("User requested cancellation of the running task.")
+        cancel_active_tasks()
+        self._status.set("Cancelling task…", busy=True)
+
+    def _update_ui_state(self) -> None:
+        enabled = not self._task_running
+        for btn in self._disableable_buttons:
+            _set_button_state(btn, enabled)
+        
+        self._private_panel.set_enabled(enabled)
+        self._apk_panel.set_enabled(enabled)
+        self._public_panel.set_enabled(enabled)
+        self._search_panel.set_enabled(enabled)
+
+    def _on_task_finish(self) -> None:
+        self._task_running = False
+        self._update_ui_state()
+
     def _run_async(self, fn, *args) -> None:
+        from core import set_cancelled
+        set_cancelled(False)
+        self._task_running = True
+        self._update_ui_state()
         self._start_log_monitor()
 
         def wrapper():
             try:
                 fn(*args)
             except Exception as e:
-                log(f"Unhandled error in background task: {e}")
-                self.after(0, lambda: messagebox.showerror("Error", str(e)))
+                from core import is_cancelled
+                if not is_cancelled():
+                    log(f"Unhandled error in background task: {e}")
+                    self.after(0, lambda: show_custom_error("Error", str(e), parent=self))
+                else:
+                    log(f"Background task exception suppressed due to cancellation: {e}")
             finally:
                 self.after(0, lambda: self._status.set("Ready", busy=False))
                 self.after(0, self._stop_log_monitor)
+                self.after(0, self._on_task_finish)
 
         threading.Thread(target=wrapper, daemon=True).start()
 
@@ -598,8 +784,8 @@ class ADBExtractorApp(tk.Tk):
     def _do_extract_private(self) -> None:
         selected = self._private_panel.get_selected()
         if not selected:
-            messagebox.showwarning("Nothing selected",
-                                   "Please select at least one package.")
+            show_custom_warning("Nothing selected",
+                                "Please select at least one package.", parent=self)
             return
         self._status.set(f"Extracting {len(selected)} private package(s)…", busy=True)
         log(f"Extracting private data: {selected}")
@@ -609,13 +795,13 @@ class ADBExtractorApp(tk.Tk):
     def _do_extract_and_analyse(self) -> None:
         aleapp = self._aleapp_path_var.get().strip()
         if not aleapp:
-            messagebox.showerror("ALEAPP not set",
-                                 "Please select the ALEAPP script path.")
+            show_custom_error("ALEAPP not set",
+                              "Please select the ALEAPP script path.", parent=self)
             return
         selected = self._private_panel.get_selected()
         if not selected:
-            messagebox.showwarning("Nothing selected",
-                                   "Please select at least one package.")
+            show_custom_warning("Nothing selected",
+                                "Please select at least one package.", parent=self)
             return
         self._status.set("Extracting & running ALEAPP…", busy=True)
 
@@ -633,8 +819,8 @@ class ADBExtractorApp(tk.Tk):
     def _do_extract_apk(self) -> None:
         selected = self._apk_panel.get_selected()
         if not selected:
-            messagebox.showwarning("Nothing selected",
-                                   "Please select at least one APK.")
+            show_custom_warning("Nothing selected",
+                                "Please select at least one APK.", parent=self)
             return
         self._status.set(f"Extracting {len(selected)} APK(s)…", busy=True)
         self._run_async(extract_apk_files, selected, self._apk_dir_map,
@@ -643,8 +829,8 @@ class ADBExtractorApp(tk.Tk):
     def _do_extract_and_mobsf(self) -> None:
         selected = self._apk_panel.get_selected()
         if not selected:
-            messagebox.showwarning("Nothing selected",
-                                   "Please select at least one APK.")
+            show_custom_warning("Nothing selected",
+                                "Please select at least one APK.", parent=self)
             return
         endpoint = self._mobsf_var.get().strip() or DEFAULT_PREFS["mobsf_endpoint"]
         self._status.set("Extracting & scanning with MobSF…", busy=True)
@@ -659,13 +845,13 @@ class ADBExtractorApp(tk.Tk):
     def _do_extract_and_jadx(self) -> None:
         jadx = self._jadx_path_var.get().strip()
         if not jadx:
-            messagebox.showerror("JADX not set",
-                                 "Please select the JADX executable path.")
+            show_custom_error("JADX not set",
+                              "Please select the JADX executable path.", parent=self)
             return
         selected = self._apk_panel.get_selected()
         if not selected:
-            messagebox.showwarning("Nothing selected",
-                                   "Please select at least one APK.")
+            show_custom_warning("Nothing selected",
+                                "Please select at least one APK.", parent=self)
             return
         self._status.set("Extracting & decompiling with JADX…", busy=True)
 
@@ -683,8 +869,8 @@ class ADBExtractorApp(tk.Tk):
     def _do_extract_public(self) -> None:
         selected = self._public_panel.get_selected()
         if not selected:
-            messagebox.showwarning("Nothing selected",
-                                   "Please select at least one package.")
+            show_custom_warning("Nothing selected",
+                                "Please select at least one package.", parent=self)
             return
         self._status.set(f"Extracting {len(selected)} public package(s)…", busy=True)
         log(f"Extracting public data: {selected}")
@@ -696,16 +882,37 @@ class ADBExtractorApp(tk.Tk):
     # ------------------------------------------------------------------
 
     def _do_full_dump(self) -> None:
+        if not get_current_device():
+            show_custom_warning("No Device", "Please select a device before performing a full dump.", parent=self)
+            return
+
         self._status.set("Creating full device dump…", busy=True)
 
         def task():
             try:
-                full_device_dump(self._output_var.get() or None)
+                res = full_device_dump(self._output_var.get() or None)
+                if res:
+                    self.after(0, lambda: show_custom_info("Success", f"Full dump completed successfully!\nSaved to: {res}", parent=self))
+                else:
+                    self.after(0, lambda: show_custom_error("Error", "Full dump failed. Check logs.txt for details.", parent=self))
             except Exception as e:
                 log(f"Full dump failed: {e}")
-                self.after(0, lambda: messagebox.showerror("Error", str(e)))
+                self.after(0, lambda: show_custom_error("Error", str(e), parent=self))
 
         self._run_async(task)
+
+    # ------------------------------------------------------------------
+    # Action handlers — Search Section
+    # ------------------------------------------------------------------
+
+    def _do_extract_files(self) -> None:
+        selected = self._search_panel.get_selected()
+        if not selected:
+            show_custom_warning("Nothing selected",
+                                "Please select at least one file from Search Results.", parent=self)
+            return
+        self._status.set(f"Extracting {len(selected)} search file(s)…", busy=True)
+        self._run_async(extract_files_from_device, selected, self._output_var.get() or None)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -719,3 +926,614 @@ class ADBExtractorApp(tk.Tk):
             "mobsf_endpoint": self._mobsf_var.get(),
         })
         self.destroy()
+
+    def _prompt_device_selection_startup(self) -> None:
+        devices = list_adb_devices()
+        if len(devices) == 1:
+            device = devices[0]
+            set_current_device(device)
+            self._device_label_var.set(device)
+            self._device_label.config(fg=COLORS["success"])
+            log(f"Auto-selected sole device at startup: {device}")
+            self._populate_all()
+        else:
+            dialog = DeviceSelectorDialog(self, is_startup=True)
+            self.wait_window(dialog)
+            
+            if dialog.selected_device:
+                set_current_device(dialog.selected_device)
+                self._device_label_var.set(dialog.selected_device)
+                self._device_label.config(fg=COLORS["success"])
+                log(f"Device selected at startup: {dialog.selected_device}")
+            else:
+                set_current_device(None)
+                self._device_label_var.set("None")
+                self._device_label.config(fg=COLORS["text_dim"])
+                log("No device selected at startup.")
+                
+            self._populate_all()
+
+    def _change_device_runtime(self) -> None:
+        dialog = DeviceSelectorDialog(self, is_startup=False)
+        self.wait_window(dialog)
+        
+        if dialog.selected_device:
+            if dialog.selected_device == "None":
+                set_current_device(None)
+                self._device_label_var.set("None")
+                self._device_label.config(fg=COLORS["text_dim"])
+                log("Device cleared / disconnected at runtime.")
+            else:
+                set_current_device(dialog.selected_device)
+                self._device_label_var.set(dialog.selected_device)
+                self._device_label.config(fg=COLORS["success"])
+                log(f"Device changed at runtime to: {dialog.selected_device}")
+            self._populate_all()
+
+
+# ---------------------------------------------------------------------------
+# Device Selector Dialog
+# ---------------------------------------------------------------------------
+
+class DeviceSelectorDialog(tk.Toplevel):
+    def __init__(self, parent, is_startup=False):
+        super().__init__(parent, bg=COLORS["bg"])
+        self.title("Select Android Device")
+        self.geometry("450x260")
+        self.resizable(False, False)
+        
+        # Center the window relative to the parent
+        self.update_idletasks()
+        parent_x = parent.winfo_x()
+        parent_y = parent.winfo_y()
+        parent_w = parent.winfo_width()
+        parent_h = parent.winfo_height()
+        
+        if parent_w < 100 or parent_h < 100:
+            parent_w = parent.winfo_screenwidth()
+            parent_h = parent.winfo_screenheight()
+            parent_x = 0
+            parent_y = 0
+            
+        x = parent_x + (parent_w - 450) // 2
+        y = parent_y + (parent_h - 260) // 2
+        self.geometry(f"+{x}+{y}")
+        
+        self.transient(parent)
+        self.grab_set()
+        
+        self.parent = parent
+        self.is_startup = is_startup
+        self.selected_device = None
+        
+        self._build_ui()
+        self._refresh_devices()
+        
+    def _build_ui(self):
+        hdr = tk.Frame(self, bg=COLORS["panel"], height=50)
+        hdr.pack(fill=tk.X)
+        hdr.pack_propagate(False)
+        
+        lbl = tk.Label(
+            hdr,
+            text="DEVICE SELECTOR",
+            bg=COLORS["panel"],
+            fg=COLORS["highlight"],
+            font=FONTS["section"]
+        )
+        lbl.pack(pady=12)
+        
+        body = tk.Frame(self, bg=COLORS["bg"], padx=20, pady=15)
+        body.pack(fill=tk.BOTH, expand=True)
+        
+        desc = tk.Label(
+            body,
+            text="Select an available Android device (physical/emulator):",
+            bg=COLORS["bg"],
+            fg=COLORS["text"],
+            font=FONTS["label"],
+            anchor="w"
+        )
+        desc.pack(fill=tk.X, pady=(0, 10))
+        
+        drop_frame = tk.Frame(body, bg=COLORS["bg"])
+        drop_frame.pack(fill=tk.X, pady=10)
+        
+        self._dev_var = tk.StringVar()
+        self._dev_menu = ttk.Combobox(
+            drop_frame,
+            textvariable=self._dev_var,
+            state="readonly",
+            font=FONTS["label"],
+            width=25
+        )
+        self._dev_menu.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+        
+        refresh_btn = tk.Button(drop_frame, text="↻ Refresh", command=self._refresh_devices)
+        _style_button(refresh_btn)
+        refresh_btn.pack(side=tk.RIGHT)
+        
+        footer = tk.Frame(self, bg=COLORS["bg"], pady=15, padx=20)
+        footer.pack(fill=tk.X, side=tk.BOTTOM)
+        
+        select_btn = tk.Button(footer, text="Select Device", command=self._on_select)
+        _style_button(select_btn)
+        select_btn.pack(side=tk.RIGHT, padx=(10, 0))
+        
+        if self.is_startup:
+            cancel_btn = tk.Button(footer, text="Run Without Device", command=self.destroy)
+            _style_button(cancel_btn)
+            cancel_btn.pack(side=tk.RIGHT)
+        else:
+            disconnect_btn = tk.Button(footer, text="Disconnect", command=self._on_disconnect)
+            _style_button(disconnect_btn)
+            disconnect_btn.pack(side=tk.RIGHT, padx=(0, 10))
+            
+            cancel_btn = tk.Button(footer, text="Cancel", command=self.destroy)
+            _style_button(cancel_btn)
+            cancel_btn.pack(side=tk.RIGHT)
+        
+    def _refresh_devices(self):
+        self._dev_menu.config(values=[])
+        self._dev_var.set("Refreshing...")
+
+        def worker():
+            try:
+                devices = list_adb_devices()
+            except Exception:
+                devices = []
+
+            self.after(0, lambda: self._on_refresh_complete(devices))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_refresh_complete(self, devices: list[str]):
+        if devices:
+            self._dev_menu.config(values=devices)
+            current = get_current_device()
+            if current in devices:
+                self._dev_menu.set(current)
+            else:
+                self._dev_menu.set(devices[0])
+        else:
+            self._dev_menu.config(values=[])
+            self._dev_var.set("No devices found")
+            
+    def _on_select(self):
+        val = self._dev_var.get()
+        if val and val != "No devices found":
+            self.selected_device = val
+            self.destroy()
+        else:
+            show_custom_warning(
+                "No Device Selected",
+                "Please connect a device and click Refresh, or run without a device.",
+                parent=self
+            )
+
+    def _on_disconnect(self) -> None:
+        self.selected_device = "None"
+        self.destroy()
+
+
+# ---------------------------------------------------------------------------
+# Custom Styled Dialogs & Popups
+# ---------------------------------------------------------------------------
+
+class CustomMessageBox(tk.Toplevel):
+    def __init__(self, parent, title: str, message: str, type_="info"):
+        super().__init__(parent, bg=COLORS["bg"])
+        self.title(title)
+        self.geometry("450x200")
+        self.resizable(False, False)
+        
+        # Center relative to parent
+        self.update_idletasks()
+        if parent:
+            parent_x = parent.winfo_x()
+            parent_y = parent.winfo_y()
+            parent_w = parent.winfo_width()
+            parent_h = parent.winfo_height()
+        else:
+            parent_x = 0
+            parent_y = 0
+            parent_w = self.winfo_screenwidth()
+            parent_h = self.winfo_screenheight()
+            
+        if parent_w < 100 or parent_h < 100:
+            parent_w = self.winfo_screenwidth()
+            parent_h = self.winfo_screenheight()
+            parent_x = 0
+            parent_y = 0
+            
+        x = parent_x + (parent_w - 450) // 2
+        y = parent_y + (parent_h - 200) // 2
+        self.geometry(f"+{x}+{y}")
+        
+        if parent:
+            self.transient(parent)
+            self.grab_set()
+            
+        self.type_ = type_
+        self.message = message
+        
+        self._build_ui()
+        
+    def _build_ui(self) -> None:
+        hdr = tk.Frame(self, bg=COLORS["panel"], height=45)
+        hdr.pack(fill=tk.X)
+        hdr.pack_propagate(False)
+        
+        icon = "ℹ"
+        icon_color = COLORS["success"]
+        if self.type_ == "warning":
+            icon = "⚠"
+            icon_color = COLORS["warning"]
+        elif self.type_ == "error":
+            icon = "✖"
+            icon_color = COLORS["highlight"]
+            
+        lbl = tk.Label(
+            hdr,
+            text=f"{icon} {self.title().upper()}",
+            bg=COLORS["panel"],
+            fg=icon_color,
+            font=FONTS["section"]
+        )
+        lbl.pack(pady=10)
+        
+        body = tk.Frame(self, bg=COLORS["bg"], padx=25, pady=20)
+        body.pack(fill=tk.BOTH, expand=True)
+        
+        msg_lbl = tk.Label(
+            body,
+            text=self.message,
+            bg=COLORS["bg"],
+            fg=COLORS["text"],
+            font=FONTS["label"],
+            wraplength=400,
+            justify=tk.LEFT,
+            anchor="nw"
+        )
+        msg_lbl.pack(fill=tk.BOTH, expand=True)
+        
+        footer = tk.Frame(self, bg=COLORS["bg"], pady=12, padx=25)
+        footer.pack(fill=tk.X, side=tk.BOTTOM)
+        
+        ok_btn = tk.Button(footer, text="OK", width=10, command=self.destroy)
+        _style_button(ok_btn)
+        ok_btn.pack(side=tk.RIGHT)
+
+
+class CustomFileDialog(tk.Toplevel):
+    def __init__(self, parent, title="Select Directory", is_directory_only=True, initial_dir=None):
+        super().__init__(parent, bg=COLORS["bg"])
+        self.title(title)
+        self.geometry("650x480")
+        
+        # Center relative to parent
+        self.update_idletasks()
+        if parent:
+            parent_x = parent.winfo_x()
+            parent_y = parent.winfo_y()
+            parent_w = parent.winfo_width()
+            parent_h = parent.winfo_height()
+        else:
+            parent_x = 0
+            parent_y = 0
+            parent_w = self.winfo_screenwidth()
+            parent_h = self.winfo_screenheight()
+            
+        if parent_w < 100 or parent_h < 100:
+            parent_w = self.winfo_screenwidth()
+            parent_h = self.winfo_screenheight()
+            parent_x = 0
+            parent_y = 0
+            
+        x = parent_x + (parent_w - 650) // 2
+        y = parent_y + (parent_h - 480) // 2
+        self.geometry(f"+{x}+{y}")
+        
+        if parent:
+            self.transient(parent)
+            self.grab_set()
+            
+        self.is_directory_only = is_directory_only
+        self.selected_path = None
+        
+        # Set initial directory
+        if initial_dir and os.path.exists(initial_dir):
+            self.current_dir = os.path.abspath(initial_dir)
+        else:
+            self.current_dir = os.path.abspath(os.getcwd())
+            
+        self._build_ui()
+        self._populate_list()
+        
+    def _build_ui(self) -> None:
+        import os
+        
+        # Header
+        hdr = tk.Frame(self, bg=COLORS["panel"], height=45)
+        hdr.pack(fill=tk.X)
+        hdr.pack_propagate(False)
+        
+        title_lbl = tk.Label(
+            hdr,
+            text=self.title().upper(),
+            bg=COLORS["panel"],
+            fg=COLORS["highlight"],
+            font=FONTS["section"]
+        )
+        title_lbl.pack(pady=10)
+        
+        # Nav bar
+        nav = tk.Frame(self, bg=COLORS["bg"], padx=15, pady=8)
+        nav.pack(fill=tk.X)
+        
+        up_btn = tk.Button(nav, text="📁 ⬉ Up", command=self._go_up)
+        _style_button(up_btn)
+        up_btn.pack(side=tk.LEFT, padx=(0, 5))
+        
+        home_btn = tk.Button(nav, text="🏠 Home", command=self._go_home)
+        _style_button(home_btn)
+        home_btn.pack(side=tk.LEFT, padx=(0, 5))
+        
+        self._path_var = tk.StringVar(value=self.current_dir)
+        path_entry = tk.Entry(nav, textvariable=self._path_var)
+        _style_entry(path_entry)
+        path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        path_entry.bind("<Return>", lambda e: self._go_to_path())
+        
+        go_btn = tk.Button(nav, text="Go", command=self._go_to_path)
+        _style_button(go_btn)
+        go_btn.pack(side=tk.RIGHT, padx=(5, 0))
+        
+        # List Container
+        body = tk.Frame(self, bg=COLORS["bg"], padx=15, pady=5)
+        body.pack(fill=tk.BOTH, expand=True)
+        
+        style = ttk.Style(self)
+        style.configure(
+            "FileDialog.Treeview",
+            background=COLORS["panel"],
+            foreground=COLORS["text"],
+            fieldbackground=COLORS["panel"],
+            font=FONTS["label"],
+            rowheight=24,
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        style.map(
+            "FileDialog.Treeview",
+            background=[("selected", COLORS["highlight"])],
+            foreground=[("selected", COLORS["text"])],
+        )
+        style.configure(
+            "FileDialog.Treeview.Heading",
+            background=COLORS["accent"],
+            foreground=COLORS["text"],
+            font=FONTS["button"],
+            relief="flat",
+        )
+        
+        cols = ("name", "type", "size")
+        self._tree = ttk.Treeview(
+            body,
+            columns=cols,
+            show="headings",
+            style="FileDialog.Treeview",
+            selectmode="browse"
+        )
+        self._tree.heading("name", text="Name", anchor="w")
+        self._tree.heading("type", text="Type", anchor="w")
+        self._tree.heading("size", text="Size", anchor="w")
+        
+        self._tree.column("name", width=330, anchor="w")
+        self._tree.column("type", width=100, anchor="w")
+        self._tree.column("size", width=100, anchor="w")
+        
+        scrollbar = ttk.Scrollbar(body, orient="vertical", command=self._tree.yview)
+        self._tree.configure(yscrollcommand=scrollbar.set)
+        
+        self._tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self._tree.bind("<Double-1>", self._on_double_click)
+        self._tree.bind("<<TreeviewSelect>>", self._on_select_change)
+        
+        # Footer
+        footer = tk.Frame(self, bg=COLORS["bg"], padx=15, pady=10)
+        footer.pack(fill=tk.X, side=tk.BOTTOM)
+        
+        self._selection_var = tk.StringVar(value="")
+        selection_lbl = tk.Label(
+            footer,
+            text="Selected Folder:" if self.is_directory_only else "Selected File:",
+            bg=COLORS["bg"],
+            fg=COLORS["text_dim"],
+            font=FONTS["label"],
+            anchor="w"
+        )
+        selection_lbl.pack(fill=tk.X, pady=(0, 5))
+        
+        selection_entry = tk.Entry(footer, textvariable=self._selection_var, state="readonly")
+        _style_entry(selection_entry)
+        selection_entry.pack(fill=tk.X, pady=(0, 10))
+        
+        btn_frame = tk.Frame(footer, bg=COLORS["bg"])
+        btn_frame.pack(fill=tk.X)
+        
+        cancel_btn = tk.Button(btn_frame, text="Cancel", command=self.destroy)
+        _style_button(cancel_btn)
+        cancel_btn.pack(side=tk.RIGHT, padx=(5, 0))
+        
+        ok_lbl = "Select Folder" if self.is_directory_only else "Open File"
+        ok_btn = tk.Button(btn_frame, text=ok_lbl, command=self._on_ok)
+        _style_button(ok_btn)
+        ok_btn.pack(side=tk.RIGHT)
+        
+    def _populate_list(self) -> None:
+        import os
+        for item in self._tree.get_children():
+            self._tree.delete(item)
+            
+        self._path_var.set(self.current_dir)
+        if self.is_directory_only:
+            self._selection_var.set(self.current_dir)
+        else:
+            self._selection_var.set("")
+            
+        try:
+            items = os.listdir(self.current_dir)
+        except OSError as e:
+            show_custom_error("Error", f"Failed to list directory:\n{e}", parent=self)
+            return
+            
+        dirs = []
+        files = []
+        for item in items:
+            full_path = os.path.join(self.current_dir, item)
+            try:
+                if os.path.isdir(full_path):
+                    dirs.append(item)
+                else:
+                    if not self.is_directory_only:
+                        files.append(item)
+            except OSError:
+                pass
+                
+        dirs.sort(key=str.lower)
+        files.sort(key=str.lower)
+        
+        for d in dirs:
+            self._tree.insert("", "end", values=(f"📁 {d}", "Folder", ""))
+            
+        for f in files:
+            full_path = os.path.join(self.current_dir, f)
+            try:
+                sz_bytes = os.path.getsize(full_path)
+                sz_str = self._format_size(sz_bytes)
+            except OSError:
+                sz_str = "Unknown"
+            self._tree.insert("", "end", values=(f"📄 {f}", "File", sz_str))
+            
+    def _format_size(self, size_bytes: int) -> str:
+        for unit in ["B", "KB", "MB", "GB"]:
+            if size_bytes < 1024.0:
+                return f"{size_bytes:.1f} {unit}"
+            size_bytes /= 1024.0
+        return f"{size_bytes:.1f} TB"
+        
+    def _go_up(self) -> None:
+        import os
+        parent = os.path.dirname(self.current_dir)
+        if parent != self.current_dir:
+            self.current_dir = parent
+            self._populate_list()
+            
+    def _go_home(self) -> None:
+        import os
+        home = os.path.expanduser("~")
+        if os.path.exists(home):
+            self.current_dir = home
+            self._populate_list()
+            
+    def _go_to_path(self) -> None:
+        import os
+        path = self._path_var.get().strip()
+        if os.path.exists(path) and os.path.isdir(path):
+            self.current_dir = os.path.abspath(path)
+            self._populate_list()
+        else:
+            show_custom_warning("Invalid Path", f"The directory does not exist:\n{path}", parent=self)
+            self._path_var.set(self.current_dir)
+            
+    def _on_double_click(self, event) -> None:
+        import os
+        sel = self._tree.selection()
+        if not sel:
+            return
+        vals = self._tree.item(sel[0], "values")
+        name = vals[0][2:]
+        full_path = os.path.join(self.current_dir, name)
+        
+        if vals[1] == "Folder":
+            if os.path.exists(full_path) and os.path.isdir(full_path):
+                self.current_dir = full_path
+                self._populate_list()
+        else:
+            if not self.is_directory_only:
+                self.selected_path = full_path
+                self.destroy()
+                
+    def _on_select_change(self, event) -> None:
+        import os
+        sel = self._tree.selection()
+        if not sel:
+            if self.is_directory_only:
+                self._selection_var.set(self.current_dir)
+            else:
+                self._selection_var.set("")
+            return
+            
+        vals = self._tree.item(sel[0], "values")
+        name = vals[0][2:]
+        full_path = os.path.join(self.current_dir, name)
+        
+        if self.is_directory_only:
+            if vals[1] == "Folder":
+                self._selection_var.set(full_path)
+            else:
+                self._selection_var.set(self.current_dir)
+        else:
+            if vals[1] == "File":
+                self._selection_var.set(full_path)
+            else:
+                self._selection_var.set("")
+                
+    def _on_ok(self) -> None:
+        import os
+        if self.is_directory_only:
+            sel_path = self._selection_var.get()
+            if os.path.exists(sel_path) and os.path.isdir(sel_path):
+                self.selected_path = sel_path
+                self.destroy()
+            else:
+                show_custom_warning("Invalid Folder", "Please select a valid folder.", parent=self)
+        else:
+            sel_path = self._selection_var.get()
+            if sel_path and os.path.exists(sel_path) and os.path.isfile(sel_path):
+                self.selected_path = sel_path
+                self.destroy()
+            else:
+                show_custom_warning("Invalid File", "Please select a valid file.", parent=self)
+
+
+# Helper Functions
+def show_custom_info(title: str, message: str, parent=None) -> None:
+    dialog = CustomMessageBox(parent, title, message, type_="info")
+    if parent:
+        parent.wait_window(dialog)
+
+def show_custom_warning(title: str, message: str, parent=None) -> None:
+    dialog = CustomMessageBox(parent, title, message, type_="warning")
+    if parent:
+        parent.wait_window(dialog)
+
+def show_custom_error(title: str, message: str, parent=None) -> None:
+    dialog = CustomMessageBox(parent, title, message, type_="error")
+    if parent:
+        parent.wait_window(dialog)
+
+def ask_custom_directory(parent, title="Select Directory", initial_dir=None) -> str | None:
+    dialog = CustomFileDialog(parent, title=title, is_directory_only=True, initial_dir=initial_dir)
+    if parent:
+        parent.wait_window(dialog)
+    return dialog.selected_path
+
+def ask_custom_openfilename(parent, title="Select File", initial_dir=None) -> str | None:
+    dialog = CustomFileDialog(parent, title=title, is_directory_only=False, initial_dir=initial_dir)
+    if parent:
+        parent.wait_window(dialog)
+    return dialog.selected_path

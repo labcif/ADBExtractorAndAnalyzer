@@ -5,7 +5,9 @@ Constants, logging, preferences, ADB helpers, and all extraction/analysis logic.
 
 import json
 import os
+import signal
 import subprocess
+import threading
 import webbrowser
 from datetime import datetime
 
@@ -34,10 +36,12 @@ DEFAULT_PREFS = {
 # ---------------------------------------------------------------------------
 
 def log(message: str) -> None:
-    """Append a timestamped message to the log file."""
+    """Append a timestamped message to the log file and print to terminal."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    formatted = f"[{timestamp}] {message}"
     with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(f"[{timestamp}] {message}\n")
+        f.write(formatted + "\n")
+    print(formatted, flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -45,39 +49,164 @@ def log(message: str) -> None:
 # ---------------------------------------------------------------------------
 
 def load_prefs() -> dict:
+    log("Loading preferences...")
     if os.path.exists(PREFS_FILE):
         try:
             with open(PREFS_FILE, "r", encoding="utf-8") as f:
-                return {**DEFAULT_PREFS, **json.load(f)}
-        except (json.JSONDecodeError, OSError):
+                prefs = {**DEFAULT_PREFS, **json.load(f)}
+                log(f"Preferences loaded successfully from {PREFS_FILE}: {prefs}")
+                return prefs
+        except (json.JSONDecodeError, OSError) as e:
+            log(f"Error reading preferences from {PREFS_FILE}: {e}. Falling back to defaults.")
             pass
+    log(f"Using default preferences: {DEFAULT_PREFS}")
     return dict(DEFAULT_PREFS)
 
 
 def save_prefs(prefs: dict) -> None:
+    log(f"Saving preferences: {prefs}")
     try:
         with open(PREFS_FILE, "w", encoding="utf-8") as f:
             json.dump(prefs, f, indent=2)
+        log(f"Preferences successfully saved to {PREFS_FILE}")
     except OSError as e:
-        log(f"Failed to save preferences: {e}")
+        log(f"Failed to save preferences to {PREFS_FILE}: {e}")
 
 
 # ---------------------------------------------------------------------------
 # ADB / Shell helpers
 # ---------------------------------------------------------------------------
 
+CURRENT_DEVICE: str | None = None
+
+ACTIVE_SUBPROCESSES: list[subprocess.Popen] = []
+SUBPROCESS_LOCK = threading.Lock()
+IS_CANCELLED = False
+
+
+def set_cancelled(val: bool) -> None:
+    global IS_CANCELLED
+    IS_CANCELLED = val
+    log(f"Task cancellation flag set to: {val}")
+
+
+def is_cancelled() -> bool:
+    return IS_CANCELLED
+
+
+def register_process(proc: subprocess.Popen) -> None:
+    with SUBPROCESS_LOCK:
+        ACTIVE_SUBPROCESSES.append(proc)
+        log(f"Registered active subprocess pid={proc.pid}. Total active processes: {len(ACTIVE_SUBPROCESSES)}")
+
+
+def unregister_process(proc: subprocess.Popen) -> None:
+    with SUBPROCESS_LOCK:
+        if proc in ACTIVE_SUBPROCESSES:
+            ACTIVE_SUBPROCESSES.remove(proc)
+            log(f"Unregistered subprocess pid={proc.pid}. Total active processes: {len(ACTIVE_SUBPROCESSES)}")
+
+
+def cancel_active_tasks() -> None:
+    set_cancelled(True)
+    log("User requested task cancellation. Terminating active background subprocesses...")
+    with SUBPROCESS_LOCK:
+        log(f"Found {len(ACTIVE_SUBPROCESSES)} active subprocess(es) to terminate.")
+        for proc in ACTIVE_SUBPROCESSES:
+            try:
+                log(f"Terminating subprocess pid={proc.pid}...")
+                if os.name != 'nt':
+                    # Kill process group to stop both shell and actual adb/other child processes
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    log(f"Sent SIGKILL to process group of pid={proc.pid}")
+                else:
+                    proc.terminate()
+                    proc.kill()
+                    log(f"Terminated/killed process pid={proc.pid}")
+            except Exception as e:
+                log(f"Error terminating process group for pid={proc.pid}: {e}")
+        ACTIVE_SUBPROCESSES.clear()
+
+
+def run_tracked_subprocess(cmd: list[str] | str, shell: bool = False, timeout: float | None = None) -> tuple[int, bytes]:
+    """Runs a subprocess, registers it for cancellation, and returns (returncode, stdout)."""
+    log(f"Launching subprocess: command={cmd!r}, shell={shell}, timeout={timeout}")
+    kwargs = {}
+    if os.name != 'nt':
+        kwargs['preexec_fn'] = os.setsid
+        
+    proc = subprocess.Popen(
+        cmd,
+        shell=shell,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        **kwargs
+    )
+    log(f"Subprocess successfully spawned with pid={proc.pid}")
+    register_process(proc)
+    try:
+        stdout, _ = proc.communicate(timeout=timeout)
+        log(f"Subprocess completed: pid={proc.pid}, returncode={proc.returncode}, output={len(stdout)} bytes")
+        return proc.returncode, stdout
+    except subprocess.TimeoutExpired:
+        log(f"Subprocess timeout expired: pid={proc.pid}, command={cmd!r}")
+        if os.name != 'nt':
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                log(f"Sent SIGKILL to process group of pid={proc.pid}")
+            except OSError as e:
+                log(f"Failed to kill process group for pid={proc.pid}: {e}")
+        else:
+            proc.kill()
+            log(f"Killed subprocess: pid={proc.pid}")
+        stdout, _ = proc.communicate()
+        raise subprocess.TimeoutExpired(cmd, timeout, output=stdout)
+    finally:
+        unregister_process(proc)
+
+
+def set_current_device(device_id: str | None) -> None:
+    global CURRENT_DEVICE
+    if device_id == "None":
+        CURRENT_DEVICE = None
+    else:
+        CURRENT_DEVICE = device_id
+
+
+def get_current_device() -> str | None:
+    return CURRENT_DEVICE
+
+
+def list_adb_devices() -> list[str]:
+    """Returns a list of connected device IDs from `adb devices`."""
+    try:
+        output = subprocess.check_output(["adb", "devices"], stderr=subprocess.STDOUT)
+        lines = output.decode("utf-8", errors="replace").splitlines()
+        devices = []
+        for line in lines[1:]:
+            if not line.strip():
+                continue
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] == "device":
+                devices.append(parts[0])
+        return devices
+    except Exception as e:
+        log(f"Failed to list adb devices: {e}")
+        return []
+
+
 def adb_shell_su(command: str) -> str | None:
     """Run a command via `adb shell su -c`. Returns stdout or None on error."""
-    try:
-        output = subprocess.check_output(
-            ["adb", "shell", "su", "-c", command],
-            stderr=subprocess.STDOUT,
-            timeout=60,
-        )
-        return output.decode("utf-8", errors="replace")
-    except subprocess.CalledProcessError as e:
-        log(f"ADB command failed: {command!r} — {e.output.decode('utf-8', errors='replace')}")
+    if not CURRENT_DEVICE:
+        log(f"ADB command aborted: no device selected — {command!r}")
         return None
+    try:
+        cmd = ["adb", "-s", CURRENT_DEVICE, "shell", "su", "-c", command]
+        code, output = run_tracked_subprocess(cmd, timeout=60)
+        if code != 0:
+            log(f"ADB command failed: {command!r} — code {code}, output: {output.decode('utf-8', errors='replace')}")
+            return None
+        return output.decode("utf-8", errors="replace")
     except subprocess.TimeoutExpired:
         log(f"ADB command timed out: {command!r}")
         return None
@@ -88,27 +217,31 @@ def adb_shell_su(command: str) -> str | None:
 
 def adb_pull(remote: str, local: str | None = None) -> bool:
     """Pull a path from the device. Returns True on success."""
-    cmd = ["adb", "pull", remote]
+    if not CURRENT_DEVICE:
+        log(f"adb pull aborted: no device selected — {remote}")
+        return False
+    cmd = ["adb", "-s", CURRENT_DEVICE, "pull", remote]
     if local:
         cmd.append(local)
     try:
-        subprocess.check_call(cmd, stderr=subprocess.STDOUT, timeout=300)
+        code, output = run_tracked_subprocess(cmd, timeout=300)
+        if code != 0:
+            log(f"adb pull failed: code {code}, output: {output.decode('utf-8', errors='replace')}")
+            return False
         return True
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
+    except Exception as e:
         log(f"adb pull failed: {e}")
         return False
 
 
-def shell_local(command: str) -> str | None:
+def shell_local(command: str, timeout: float | None = None) -> str | None:
     """Run a local shell command. Returns stdout or None on error."""
     try:
-        output = subprocess.check_output(
-            command, shell=True, stderr=subprocess.STDOUT, timeout=300
-        )
+        code, output = run_tracked_subprocess(command, shell=True, timeout=timeout)
+        if code != 0:
+            log(f"Local command failed: {command!r} — code {code}")
+            return None
         return output.decode("utf-8", errors="replace")
-    except subprocess.CalledProcessError as e:
-        log(f"Local command failed: {command!r} — {e}")
-        return None
     except subprocess.TimeoutExpired:
         log(f"Local command timed out: {command!r}")
         return None
@@ -151,6 +284,72 @@ def get_last_log_line() -> str:
 # ---------------------------------------------------------------------------
 # Device listing helpers (used by the GUI to populate checklists)
 # ---------------------------------------------------------------------------
+
+def find_files_on_device(query: str) -> list[str]:
+    """Find all files on the device matching the query string under /data and /sdcard."""
+    if not query:
+        return []
+    cmd = f"find /data /sdcard -name '*{query}*' 2>/dev/null"
+    log(f"Searching for files matching '{query}': {cmd}")
+    result = adb_shell_su(cmd)
+    if result:
+        return sorted(line.strip() for line in result.split("\n") if line.strip())
+    return []
+
+
+def extract_files_from_device(selected: list[str], output_path: str | None) -> str | None:
+    """
+    Extract selected files/folders from the device to the PC using root tar streaming.
+    Recreates the directory structure locally and bypasses permission restrictions.
+    """
+    if not selected:
+        return None
+
+    folder_name = f"search_extraction_{_timestamp()}"
+    base = output_path if output_path else get_cwd()
+    local_dir = os.path.join(base, folder_name)
+    os.makedirs(local_dir, exist_ok=True)
+
+    local_archive = os.path.join(local_dir, "search_extract.tar")
+    adb_cmd = f"adb -s {CURRENT_DEVICE}" if CURRENT_DEVICE else "adb"
+
+    # Quote each path to handle spaces or special characters safely
+    quoted_paths = " ".join(f"'{p}'" for p in selected)
+
+    # Stream the tar archive directly from the phone to the PC using su for root access
+    cmd = f'{adb_cmd} exec-out su -c "stty raw 2>/dev/null; tar -cf - {quoted_paths} 2>/dev/null" > "{local_archive}"'
+    log(f"Streaming searched files to local tar: {cmd}")
+    shell_local(cmd)
+
+    if is_cancelled():
+        import shutil
+        if os.path.exists(local_dir):
+            try:
+                shutil.rmtree(local_dir)
+            except OSError:
+                pass
+        log("Search file extraction cancelled: cleaned up local files.")
+        return None
+
+    # Extract locally on the PC
+    if os.path.exists(local_archive) and os.path.getsize(local_archive) > 0:
+        log(f"Extracting local search tar: {local_archive}")
+        extract_cmd = f'tar -xf "{local_archive}" -C "{local_dir}"'
+        shell_local(extract_cmd)
+        try:
+            os.remove(local_archive)
+        except OSError:
+            pass
+        log(f"Search file extraction complete -> {local_dir}")
+        return local_dir
+    else:
+        try:
+            os.remove(local_archive)
+        except OSError:
+            pass
+        log("Search file extraction failed: no data received or file not found.")
+        return None
+
 
 def list_private_packages() -> list[str]:
     """Return sorted list of package names under /data/data/."""
@@ -228,30 +427,54 @@ def list_public_packages() -> list[str]:
 
 def extract_private_data(selected: list[str], output_path: str | None) -> str | None:
     """
-    Extract /data/data/<pkg> for each selected package via tar → sdcard → pull.
-    Returns the local folder path, or None if nothing was selected.
+    Extract /data/data/<pkg> for each selected package by streaming tar directly to the PC.
+    Uses 0 extra space on the phone.
     """
     if not selected:
         return None
 
     folder_name = f"private_data_{_timestamp()}"
-    remote_folder = _device_temp_folder(folder_name)
+    base = output_path if output_path else get_cwd()
+    local_dir = os.path.join(base, folder_name)
+    os.makedirs(local_dir, exist_ok=True)
 
-    adb_shell_su(f"mkdir -p {remote_folder}")
-    log(f"Created device folder: {remote_folder}")
+    adb_cmd = f"adb -s {CURRENT_DEVICE}" if CURRENT_DEVICE else "adb"
 
     for pkg in selected:
-        archive = f"/sdcard/Download/{pkg}.tar.gz"
-        adb_shell_su(f"tar -czf {archive} /data/data/{pkg}")
-        log(f"Compressed /data/data/{pkg}")
-        adb_shell_su(f"tar -xzf {archive} -C {remote_folder}")
-        log(f"Extracted to {remote_folder}")
-        adb_shell_su(f"rm -rf {archive}")
+        if is_cancelled():
+            break
+        local_archive = os.path.join(local_dir, f"{pkg}.tar")
+        
+        # Stream the tar archive directly from the phone to a local tar file on the PC
+        cmd = f'{adb_cmd} exec-out su -c "stty raw 2>/dev/null; tar -cf - /data/data/{pkg} 2>/dev/null" > "{local_archive}"'
+        log(f"Streaming /data/data/{pkg} to local tar")
+        shell_local(cmd)
 
-    local_path = _pull_folder(remote_folder, output_path)
-    adb_shell_su(f"rm -rf {remote_folder}")
-    log(f"Private extraction complete → {local_path}")
-    return local_path
+        if is_cancelled():
+            break
+
+        # Extract locally on the PC
+        if os.path.exists(local_archive) and os.path.getsize(local_archive) > 0:
+            log(f"Extracting local tar: {local_archive}")
+            extract_cmd = f'tar -xf "{local_archive}" -C "{local_dir}"'
+            shell_local(extract_cmd)
+            try:
+                os.remove(local_archive)
+            except OSError:
+                pass
+
+    if is_cancelled():
+        import shutil
+        if os.path.exists(local_dir):
+            try:
+                shutil.rmtree(local_dir)
+            except OSError:
+                pass
+        log("Private extraction cancelled: cleaned up local files.")
+        return None
+
+    log(f"Private extraction complete → {local_dir}")
+    return local_dir
 
 
 # ---------------------------------------------------------------------------
@@ -264,46 +487,59 @@ def extract_apk_files(
     output_path: str | None,
 ) -> tuple[str, list[str]]:
     """
-    Extract ALL contents of each selected package's APK directory.
-    apk_dir_map maps display label → absolute device path of the package dir,
-    e.g. 'com.example.app' → '/data/app/~~abc==/com.example.app-XYZ'
-
-    Returns (local_output_folder, [package_names_extracted]).
+    Extract ALL contents of each selected package's APK directory by streaming tar to the PC.
+    Uses 0 extra space on the phone.
     """
     folder_name = f"apk_files_{_timestamp()}"
-    staging = f"/sdcard/Download/{folder_name}"
     base = output_path if output_path else get_cwd()
     local_base = os.path.join(base, folder_name)
+    os.makedirs(local_base, exist_ok=True)
 
-    adb_shell_su(f"mkdir -p '{staging}'")
-    log(f"APK staging folder created: {staging}")
+    adb_cmd = f"adb -s {CURRENT_DEVICE}" if CURRENT_DEVICE else "adb"
 
     extracted = []
     for pkg in selected:
+        if is_cancelled():
+            break
         pkg_dir = apk_dir_map.get(pkg)
         if not pkg_dir:
             log(f"APK: no device directory mapped for '{pkg}', skipping.")
             continue
 
-        dest_dir = f"{staging}/{pkg}"
-        adb_shell_su(f"mkdir -p '{dest_dir}'")
+        local_pkg_dir = os.path.join(local_base, pkg)
+        os.makedirs(local_pkg_dir, exist_ok=True)
+        local_archive = os.path.join(local_pkg_dir, "pkg.tar")
 
-        # Copy ALL contents (splits, configs, etc.) instead of just base.apk
-        result = adb_shell_su(f"cp -r '{pkg_dir}/.' '{dest_dir}/'")
-        if result is None:
-            log(f"APK: cp failed for {pkg_dir}, trying archive mode")
-            adb_shell_su(f"cp -a '{pkg_dir}/.' '{dest_dir}/'")
+        # Stream the tar archive of the APK directory directly from the phone to the PC
+        cmd = f'{adb_cmd} exec-out su -c "stty raw 2>/dev/null; tar -cf - -C \\"{pkg_dir}\\" . 2>/dev/null" > "{local_archive}"'
+        log(f"Streaming APK directory for {pkg} to local tar")
+        shell_local(cmd)
 
-        log(f"APK: {pkg_dir} → {dest_dir}/ (full directory copy)")
-        extracted.append(pkg)
+        if is_cancelled():
+            break
 
-    ok = adb_pull(staging, base)
-    adb_shell_su(f"rm -rf '{staging}'")
-    if ok:
-        log(f"APK extraction complete → {local_base}")
-    else:
-        log(f"APK: adb pull failed or partially failed for {staging}")
+        # Extract locally on the PC
+        if os.path.exists(local_archive) and os.path.getsize(local_archive) > 0:
+            log(f"Extracting local APK tar: {local_archive}")
+            extract_cmd = f'tar -xf "{local_archive}" -C "{local_pkg_dir}"'
+            shell_local(extract_cmd)
+            try:
+                os.remove(local_archive)
+            except OSError:
+                pass
+            extracted.append(pkg)
 
+    if is_cancelled():
+        import shutil
+        if os.path.exists(local_base):
+            try:
+                shutil.rmtree(local_base)
+            except OSError:
+                pass
+        log("APK extraction cancelled by user: output cleaned up.")
+        return local_base, []
+
+    log(f"APK extraction complete → {local_base}")
     return local_base, extracted
 
 
@@ -312,26 +548,55 @@ def extract_apk_files(
 # ---------------------------------------------------------------------------
 
 def extract_public_data(selected: list[str], output_path: str | None) -> str | None:
-    """Extract /sdcard/Android/data/<pkg> for each selected package."""
+    """
+    Extract /sdcard/Android/data/<pkg> for each selected package by streaming tar to the PC.
+    Uses 0 extra space on the phone.
+    """
     if not selected:
         return None
 
     folder_name = f"public_data_{_timestamp()}"
-    remote_folder = _device_temp_folder(folder_name)
-    adb_shell_su(f"mkdir -p {remote_folder}")
-    log(f"Created device folder: {remote_folder}")
+    base = output_path if output_path else get_cwd()
+    local_dir = os.path.join(base, folder_name)
+    os.makedirs(local_dir, exist_ok=True)
+
+    adb_cmd = f"adb -s {CURRENT_DEVICE}" if CURRENT_DEVICE else "adb"
 
     for pkg in selected:
-        archive = f"/sdcard/Download/{pkg}.tar.gz"
-        adb_shell_su(f"tar -czf {archive} /sdcard/Android/data/{pkg}")
-        adb_shell_su(f"tar -xzf {archive} -C {remote_folder}")
-        adb_shell_su(f"rm -rf {archive}")
-        log(f"Packed {pkg}")
+        if is_cancelled():
+            break
+        local_archive = os.path.join(local_dir, f"{pkg}.tar")
+        
+        # Stream the tar archive directly from the phone to the PC
+        cmd = f'{adb_cmd} exec-out su -c "stty raw 2>/dev/null; tar -cf - /sdcard/Android/data/{pkg} 2>/dev/null" > "{local_archive}"'
+        log(f"Streaming /sdcard/Android/data/{pkg} to local tar")
+        shell_local(cmd)
 
-    local_path = _pull_folder(remote_folder, output_path)
-    adb_shell_su(f"rm -rf {remote_folder}")
-    log(f"Public extraction complete → {local_path}")
-    return local_path
+        if is_cancelled():
+            break
+
+        # Extract locally on the PC
+        if os.path.exists(local_archive) and os.path.getsize(local_archive) > 0:
+            log(f"Extracting local tar: {local_archive}")
+            extract_cmd = f'tar -xf "{local_archive}" -C "{local_dir}"'
+            shell_local(extract_cmd)
+            try:
+                os.remove(local_archive)
+            except OSError:
+                pass
+
+    if is_cancelled():
+        import shutil
+        if os.path.exists(local_dir):
+            try:
+                shutil.rmtree(local_dir)
+            except OSError:
+                pass
+        log("Public extraction cancelled: cleaned up local files.")
+        return None
+
+    log(f"Public extraction complete → {local_dir}")
+    return local_dir
 
 
 # ---------------------------------------------------------------------------
@@ -339,54 +604,30 @@ def extract_public_data(selected: list[str], output_path: str | None) -> str | N
 # ---------------------------------------------------------------------------
 
 def full_device_dump(output_path: str | None) -> str | None:
-    folder_name = f"full_logical_backup_{_timestamp()}"
     base = output_path if output_path else get_cwd()
-    local_dir = os.path.join(base, folder_name)
-    os.makedirs(local_dir, exist_ok=True)
+    local_file = os.path.join(base, f"full_system_dump_{_timestamp()}.tar")
 
-    # Step 1: get mount points
-    mounts = adb_shell_su("cat /proc/mounts")
-    if not mounts:
-        log("Failed to read mount points")
+    adb_cmd = f"adb -s {CURRENT_DEVICE}" if CURRENT_DEVICE else "adb"
+    # Command matching user's exact specification
+    cmd = f'{adb_cmd} exec-out su -c "stty raw 2>/dev/null; tar -cf - /data /sdcard 2>/dev/null" > "{local_file}"'
+    log(f"Starting full system dump: {cmd}")
+    shell_local(cmd)
+
+    if is_cancelled():
+        if os.path.exists(local_file):
+            try:
+                os.remove(local_file)
+            except OSError:
+                pass
+        log("Full system dump cancelled by user: file removed.")
         return None
 
-    valid_mounts = []
-
-    for line in mounts.splitlines():
-        parts = line.split()
-        if len(parts) < 2:
-            continue
-
-        mount_point = parts[1]
-        fs_type = parts[2]
-
-        # Exclude virtual/system mounts
-        if fs_type in ("proc", "sysfs", "tmpfs", "devpts", "selinuxfs", "debugfs"):
-            continue
-
-        # Exclude problematic paths
-        if mount_point.startswith(("/proc", "/sys", "/dev")):
-            continue
-
-        valid_mounts.append(mount_point)
-
-    # Remove duplicates and sort
-    valid_mounts = sorted(set(valid_mounts))
-
-    log(f"Discovered mount points: {valid_mounts}")
-
-    # Step 2: stream each mount
-    for mount in valid_mounts:
-        safe_name = mount.strip("/").replace("/", "_") or "root"
-        local_file = os.path.join(local_dir, f"{safe_name}.tar")
-
-        cmd = f'adb exec-out su -c "tar -cf - \\"{mount}\\"" > "{local_file}"'
-        shell_local(cmd)
-
-        log(f"Dumped mount: {mount}")
-
-    log(f"Full logical dump complete → {local_dir}")
-    return local_dir
+    if os.path.exists(local_file) and os.path.getsize(local_file) > 0:
+        log(f"Full logical dump complete → {local_file}")
+        return local_file
+    else:
+        log("Full logical dump failed (output file empty or not found).")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -436,6 +677,8 @@ def run_mobsf(endpoint: str, local_base: str, pkgs: list[str]) -> None:
         return
 
     for pkg in pkgs:
+        if is_cancelled():
+            break
         apk_path = os.path.join(local_base, pkg, "base.apk")
         if not os.path.exists(apk_path):
             log(f"MobSF: APK not found at {apk_path}, skipping.")
@@ -480,6 +723,8 @@ def run_jadx(jadx_path: str, local_base: str, pkgs: list[str]) -> None:
     log(f"JADX: Decompiling into {decompile_base}")
 
     for pkg in pkgs:
+        if is_cancelled():
+            break
         out_dir = os.path.join(decompile_base, pkg)
         apk = os.path.join(local_base, pkg, "base.apk")
         shell_local(f"mkdir -p '{out_dir}'")
