@@ -25,7 +25,7 @@ PREFS_FILE = "preferences.json"
 
 DEFAULT_PREFS = {
     "aleapp_path": "",
-    "output_path": "",
+    "output_path": os.path.expanduser("~"),
     "jadx_path": "",
     "mobsf_endpoint": "172.22.21.51:8000",
 }
@@ -50,17 +50,26 @@ def log(message: str) -> None:
 
 def load_prefs() -> dict:
     log("Loading preferences...")
+    default_prefs = dict(DEFAULT_PREFS)
+    if not default_prefs.get("output_path"):
+        default_prefs["output_path"] = os.path.expanduser("~")
+
     if os.path.exists(PREFS_FILE):
         try:
             with open(PREFS_FILE, "r", encoding="utf-8") as f:
-                prefs = {**DEFAULT_PREFS, **json.load(f)}
+                loaded = json.load(f)
+                if not isinstance(loaded, dict):
+                    loaded = {}
+                prefs = {**default_prefs, **loaded}
+                if not prefs.get("output_path"):
+                    prefs["output_path"] = os.path.expanduser("~")
                 log(f"Preferences loaded successfully from {PREFS_FILE}: {prefs}")
                 return prefs
         except (json.JSONDecodeError, OSError) as e:
             log(f"Error reading preferences from {PREFS_FILE}: {e}. Falling back to defaults.")
             pass
-    log(f"Using default preferences: {DEFAULT_PREFS}")
-    return dict(DEFAULT_PREFS)
+    log(f"Using default preferences: {default_prefs}")
+    return default_prefs
 
 
 def save_prefs(prefs: dict) -> None:
@@ -265,8 +274,8 @@ def _device_temp_folder(name: str) -> str:
 
 
 def _pull_folder(remote: str, local_base: str | None) -> str:
-    """Pull remote folder to local_base (or cwd). Returns the local destination."""
-    dest = local_base if local_base else get_cwd()
+    """Pull remote folder to local_base (or user home folder). Returns the local destination."""
+    dest = local_base if local_base else os.path.expanduser("~")
     adb_pull(remote, dest)
     folder_name = remote.rstrip("/").split("/")[-1]
     return os.path.join(dest, folder_name)
@@ -306,7 +315,7 @@ def extract_files_from_device(selected: list[str], output_path: str | None) -> s
         return None
 
     folder_name = f"search_extraction_{_timestamp()}"
-    base = output_path if output_path else get_cwd()
+    base = output_path if output_path else os.path.expanduser("~")
     local_dir = os.path.join(base, folder_name)
     os.makedirs(local_dir, exist_ok=True)
 
@@ -434,7 +443,7 @@ def extract_private_data(selected: list[str], output_path: str | None) -> str | 
         return None
 
     folder_name = f"private_data_{_timestamp()}"
-    base = output_path if output_path else get_cwd()
+    base = output_path if output_path else os.path.expanduser("~")
     local_dir = os.path.join(base, folder_name)
     os.makedirs(local_dir, exist_ok=True)
 
@@ -491,7 +500,7 @@ def extract_apk_files(
     Uses 0 extra space on the phone.
     """
     folder_name = f"apk_files_{_timestamp()}"
-    base = output_path if output_path else get_cwd()
+    base = output_path if output_path else os.path.expanduser("~")
     local_base = os.path.join(base, folder_name)
     os.makedirs(local_base, exist_ok=True)
 
@@ -556,7 +565,7 @@ def extract_public_data(selected: list[str], output_path: str | None) -> str | N
         return None
 
     folder_name = f"public_data_{_timestamp()}"
-    base = output_path if output_path else get_cwd()
+    base = output_path if output_path else os.path.expanduser("~")
     local_dir = os.path.join(base, folder_name)
     os.makedirs(local_dir, exist_ok=True)
 
@@ -604,7 +613,7 @@ def extract_public_data(selected: list[str], output_path: str | None) -> str | N
 # ---------------------------------------------------------------------------
 
 def full_device_dump(output_path: str | None) -> str | None:
-    base = output_path if output_path else get_cwd()
+    base = output_path if output_path else os.path.expanduser("~")
     local_file = os.path.join(base, f"full_system_dump_{_timestamp()}.tar")
 
     adb_cmd = f"adb -s {CURRENT_DEVICE}" if CURRENT_DEVICE else "adb"
