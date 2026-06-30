@@ -2,7 +2,8 @@
 
 ## Overview
 This Python program provides a comprehensive solution for extracting, analyzing, and decompiling data from Android devices using ADB (Android Debug Bridge) shell commands. It facilitates the extraction of public, private, and APK data from Android devices, followed by analysis and decompilation using JADX, ALEAPP, and MobSF.
-<img width="1922" height="1082" alt="imagem" src="https://github.com/user-attachments/assets/86b4e7ff-3d24-4660-9936-c509586c33b6" />
+<img width="1922" height="1052" alt="imagem" src="https://github.com/user-attachments/assets/b45c150b-62a4-484c-ac4b-8d996c5a2a01" />
+
 
 ---
 
