@@ -705,32 +705,42 @@ class ADBExtractorApp(tk.Tk):
 
     def _check_device_connectivity(self) -> None:
         device = get_current_device()
-        if not device or device == "None":
-            self._device_label_var.set("None")
-            self._device_label.config(fg=COLORS["text_dim"])
-            self.after(3000, self._check_device_connectivity)
-            return
 
         def worker():
             try:
                 devices = list_adb_devices()
-                connected = (device in devices)
             except Exception:
-                connected = False
+                devices = []
 
             # Update UI on main thread
-            self.after(0, lambda: self._update_device_status_ui(device, connected))
+            self.after(0, lambda: self._update_device_status_ui(device, devices))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _update_device_status_ui(self, device: str, connected: bool) -> None:
-        if connected:
+    def _update_device_status_ui(self, device: str | None, devices: list[str]) -> None:
+        current_device = get_current_device()
+
+        # Do not overwrite a device selected while the background check ran.
+        if current_device != device:
+            device = current_device
+
+        if not device and len(devices) == 1:
+            device = devices[0]
+            set_current_device(device)
+            self._device_label_var.set(device)
+            self._device_label.config(fg=COLORS["success"])
+            log(f"Auto-selected newly connected device: {device}")
+            self._populate_all()
+        elif not device:
+            self._device_label_var.set("None")
+            self._device_label.config(fg=COLORS["text_dim"])
+        elif device in devices:
             self._device_label_var.set(device)
             self._device_label.config(fg=COLORS["success"])
         else:
             self._device_label_var.set(f"{device} (Offline)")
             self._device_label.config(fg=COLORS["warning"])
-        
+
         self.after(3000, self._check_device_connectivity)
 
     def _cancel_current_task(self) -> None:
