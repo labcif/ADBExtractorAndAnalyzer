@@ -53,6 +53,9 @@ COLORS = {
     "warning":      "#ff9800",
 }
 
+ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+ICON_PATH = os.path.join(ASSET_DIR, "icon.png")
+
 FONTS = {
     "title":   ("Consolas", 20, "bold"),
     "section": ("Consolas", 13, "bold"),
@@ -413,7 +416,7 @@ class ADBExtractorApp(tk.Tk):
         self.minsize(1000, 700)
         self.configure(bg=COLORS["bg"])
 
-        self._app_icon = tk.PhotoImage(file="assets/icon.png")
+        self._app_icon = tk.PhotoImage(file=ICON_PATH)
         self.iconphoto(True, self._app_icon)
 
         self._prefs = load_prefs()
@@ -460,7 +463,7 @@ class ADBExtractorApp(tk.Tk):
         hdr.pack(fill=tk.X)
         hdr.pack_propagate(False)
 
-        img = Image.open("assets/icon.png")
+        img = Image.open(ICON_PATH)
         img = img.resize((24, 24))
         self._icon_img = ImageTk.PhotoImage(img)
 
