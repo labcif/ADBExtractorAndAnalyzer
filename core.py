@@ -3,6 +3,7 @@ core.py — ADB Extractor & Analyser 2.0
 Constants, logging, preferences, ADB helpers, and all extraction/analysis logic.
 """
 
+import hashlib
 import json
 import os
 import signal
@@ -42,6 +43,50 @@ def log(message: str) -> None:
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(formatted + "\n")
     print(formatted, flush=True)
+
+
+def write_hash_manifests(extraction_dir: str) -> None:
+    """Write MD5 and SHA-256 manifests for all files in an extraction directory."""
+    manifest_names = {"md5_hashes.txt", "sha256_hashes.txt"}
+    files: list[tuple[str, str]] = []
+
+    for root, dirs, filenames in os.walk(extraction_dir):
+        dirs.sort()
+        for filename in sorted(filenames):
+            if root == extraction_dir and filename in manifest_names:
+                continue
+            path = os.path.join(root, filename)
+            if os.path.isfile(path):
+                relative_path = os.path.relpath(path, extraction_dir).replace(os.sep, "/")
+                files.append((relative_path, path))
+
+    md5_lines: list[str] = []
+    sha256_lines: list[str] = []
+    for relative_path, path in files:
+        md5_hash = hashlib.md5(usedforsecurity=False)
+        sha256_hash = hashlib.sha256()
+        try:
+            with open(path, "rb") as extracted_file:
+                while chunk := extracted_file.read(1024 * 1024):
+                    md5_hash.update(chunk)
+                    sha256_hash.update(chunk)
+        except OSError as exc:
+            log(f"Hashing failed for {path}: {exc}")
+            raise
+
+        md5_lines.append(f"{md5_hash.hexdigest()}  {relative_path}\n")
+        sha256_lines.append(f"{sha256_hash.hexdigest()}  {relative_path}\n")
+
+    try:
+        with open(os.path.join(extraction_dir, "md5_hashes.txt"), "w", encoding="utf-8") as md5_file:
+            md5_file.writelines(md5_lines)
+        with open(os.path.join(extraction_dir, "sha256_hashes.txt"), "w", encoding="utf-8") as sha256_file:
+            sha256_file.writelines(sha256_lines)
+    except OSError as exc:
+        log(f"Could not write hash manifests in {extraction_dir}: {exc}")
+        raise
+
+    log(f"Hash manifests created in {extraction_dir}: {len(files)} file(s)")
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +394,7 @@ def extract_files_from_device(selected: list[str], output_path: str | None) -> s
             os.remove(local_archive)
         except OSError:
             pass
+        write_hash_manifests(local_dir)
         log(f"Search file extraction complete -> {local_dir}")
         return local_dir
     else:
@@ -482,6 +528,7 @@ def extract_private_data(selected: list[str], output_path: str | None) -> str | 
         log("Private extraction cancelled: cleaned up local files.")
         return None
 
+    write_hash_manifests(local_dir)
     log(f"Private extraction complete → {local_dir}")
     return local_dir
 
@@ -548,6 +595,7 @@ def extract_apk_files(
         log("APK extraction cancelled by user: output cleaned up.")
         return local_base, []
 
+    write_hash_manifests(local_base)
     log(f"APK extraction complete → {local_base}")
     return local_base, extracted
 
@@ -604,6 +652,7 @@ def extract_public_data(selected: list[str], output_path: str | None) -> str | N
         log("Public extraction cancelled: cleaned up local files.")
         return None
 
+    write_hash_manifests(local_dir)
     log(f"Public extraction complete → {local_dir}")
     return local_dir
 
@@ -614,7 +663,10 @@ def extract_public_data(selected: list[str], output_path: str | None) -> str | N
 
 def full_device_dump(output_path: str | None) -> str | None:
     base = output_path if output_path else os.path.expanduser("~")
-    local_file = os.path.join(base, f"full_system_dump_{_timestamp()}.tar")
+    folder_name = f"full_system_dump_{_timestamp()}"
+    local_dir = os.path.join(base, folder_name)
+    os.makedirs(local_dir, exist_ok=True)
+    local_file = os.path.join(local_dir, f"{folder_name}.tar")
 
     adb_cmd = f"adb -s {CURRENT_DEVICE}" if CURRENT_DEVICE else "adb"
     # Command matching user's exact specification
@@ -623,15 +675,17 @@ def full_device_dump(output_path: str | None) -> str | None:
     shell_local(cmd)
 
     if is_cancelled():
-        if os.path.exists(local_file):
+        if os.path.exists(local_dir):
             try:
-                os.remove(local_file)
+                import shutil
+                shutil.rmtree(local_dir)
             except OSError:
                 pass
-        log("Full system dump cancelled by user: file removed.")
+        log("Full system dump cancelled by user: extraction folder removed.")
         return None
 
     if os.path.exists(local_file) and os.path.getsize(local_file) > 0:
+        write_hash_manifests(local_dir)
         log(f"Full logical dump complete → {local_file}")
         return local_file
     else:
