@@ -21,6 +21,36 @@ This Python program provides a comprehensive solution for extracting, analyzing,
 - JADX (for APK decompilation)
 - ALEAPP (for forensic analysis)
 
+## Android emulator root requirements
+The application uses `adb shell su -c` for its extraction commands. Therefore,
+an emulator being visible to ADB is not enough: it must provide a working
+`su` binary and grant superuser access to the ADB shell.
+
+Standard Android Studio images usually do not meet this requirement:
+
+- **Google Play images** use production-style builds and normally cannot be
+  rooted with the standard AVD configuration.
+- **Google APIs images** may support `adb root` on some system-image builds,
+  but `adb root` alone does not satisfy this application unless `su -c` also
+  works. A root-enabled image or a properly configured root solution is still
+  required.
+
+Without root, the application may connect to the emulator and list the device,
+but private data, APK data, and full-device extraction will fail. Public data
+access is also limited by Android's storage restrictions.
+
+For a practical emulator setup, use a root-enabled AOSP or compatible Google
+APIs image and an emulator-compatible version of [Magisk](https://github.com/topjohnwu/Magisk).
+After installing and configuring Magisk, allow superuser access for ADB and
+verify the required interface before running the application:
+
+```bash
+adb shell su -c id
+```
+
+The command should report `uid=0`. Do not rely on a Google Play image or on
+`adb root` alone; the application specifically requires `su -c`.
+
 
 ## Dependencies
 ### Ubuntu / Debian
