@@ -39,3 +39,9 @@ last_output_file.txt
 preferences.json
 
 logs.txt
+
+# Flatpak build artifacts
+.flatpak-builder/
+build/
+repo/
+*.flatpak

@@ -1,0 +1,4 @@
+#!/bin/sh
+export JAVA_HOME=/app/jre
+export PATH="$JAVA_HOME/bin:/app/libexec/jadx/bin:$PATH"
+exec /app/libexec/jadx/bin/jadx "$@"

@@ -1,0 +1,98 @@
+app-id: io.github.labcif.adbextractorandanalyzer
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: adbextractor
+
+# Private distribution permissions:
+# - Tkinter uses X11.
+# - USB ADB requires access to the Android device node. `all` is used because
+#   the installed Flatpak version predates the narrower `usb` permission.
+# - home/media access preserves the existing evidence-folder chooser.
+# - network is required for remote MobSF and optional TCP ADB.
+finish-args:
+  - --socket=x11
+  - --share=ipc
+  - --device=all
+  - --share=network
+  - --filesystem=home
+  - --filesystem=/media
+  - --filesystem=/mnt
+  - --filesystem=/run/media
+
+modules:
+  - name: python-dependencies
+    buildsystem: simple
+    build-options:
+      build-args:
+        - --share=network
+    build-commands:
+      - python3 -m pip install --ignore-installed --prefix=/app --no-cache-dir -r requirements.txt
+    sources:
+      - type: file
+        path: ../requirements.txt
+
+  - name: java-runtime
+    buildsystem: simple
+    build-commands:
+      - install -d /app/jre
+      - tar -xzf OpenJDK17U-jre.tar.gz --strip-components=1 -C /app/jre
+      - install -Dm644 /app/jre/NOTICE /app/share/licenses/adbextractor-temurin-jre/NOTICE
+    sources:
+      - type: file
+        url: https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.19%2B10/OpenJDK17U-jre_x64_linux_hotspot_17.0.19_10.tar.gz
+        sha256: adb5a2364baa51de1ef91bb9911f5a61d24b045fe1d6647cb8050272a3a8ee75
+        dest-filename: OpenJDK17U-jre.tar.gz
+
+  - name: jadx
+    buildsystem: simple
+    build-commands:
+      - install -d /app/libexec/jadx
+      - unzip -q jadx.zip -d /app/libexec/jadx
+      - install -Dm644 /app/libexec/jadx/LICENSE /app/share/licenses/adbextractor-jadx/LICENSE
+    sources:
+      - type: file
+        url: https://github.com/skylot/jadx/releases/download/v1.5.6/jadx-1.5.6.zip
+        sha256: 545ea2be9c242511bc145755cf4bda2485ade42966e096f8b4d3da2a230e8974
+        dest-filename: jadx.zip
+
+  - name: android-platform-tools
+    buildsystem: simple
+    build-commands:
+      - install -d /app/libexec
+      - unzip -q platform-tools.zip -d /app/libexec
+      - ln -s /app/libexec/platform-tools/adb /app/bin/adb
+      - install -Dm644 /app/libexec/platform-tools/NOTICE.txt /app/share/licenses/adbextractor-platform-tools/NOTICE.txt
+    sources:
+      - type: file
+        url: https://dl.google.com/android/repository/platform-tools_r37.0.1-linux.zip
+        sha256: d230f13842f60f782a8645f9c813f8f845bf36089ea7289f28c48f17979313f1
+        dest-filename: platform-tools.zip
+
+  - name: aleapp
+    buildsystem: simple
+    build-commands:
+      - install -d /app/libexec/aleapp
+      - cp -a . /app/libexec/aleapp/
+      - install -Dm644 LICENSE /app/share/licenses/adbextractor-aleapp/LICENSE
+    sources:
+      - type: git
+        url: https://github.com/abrignoni/ALEAPP.git
+        tag: v2026.1.0
+        commit: fbc2b672ce757dd94e36eeab847eb138f745551f
+
+  - name: adbextractorandanalyzer
+    buildsystem: simple
+    build-commands:
+      - install -d /app/share/adbextractorandanalyzer/assets
+      - install -Dm644 main.py core.py gui.py /app/share/adbextractorandanalyzer/
+      - install -Dm644 assets/icon.png /app/share/adbextractorandanalyzer/assets/icon.png
+      - install -Dm644 LICENSE /app/share/licenses/adbextractorandanalyzer/LICENSE
+      - install -Dm755 flatpak/adbextractor /app/bin/adbextractor
+      - install -Dm755 flatpak/jadx-wrapper /app/bin/jadx
+      - install -Dm644 flatpak/io.github.labcif.adbextractorandanalyzer.desktop /app/share/applications/io.github.labcif.adbextractorandanalyzer.desktop
+      - install -Dm644 flatpak/io.github.labcif.adbextractorandanalyzer.metainfo.xml /app/share/metainfo/io.github.labcif.adbextractorandanalyzer.metainfo.xml
+      - install -Dm644 assets/icon.png /app/share/icons/hicolor/512x512/apps/io.github.labcif.adbextractorandanalyzer.png
+    sources:
+      - type: dir
+        path: ..

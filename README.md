@@ -56,6 +56,41 @@ python main.py
 ## OS
 Developed for Linux.
 
+## Private Flatpak build
+The repository includes a private Flatpak manifest under `flatpak/`. It bundles
+the application dependencies, ALEAPP, Android platform-tools, JADX, and a Java
+runtime for JADX. The manifest currently pins ALEAPP `v2026.1.0`, Android
+platform-tools `r37.0.1`, JADX `1.5.6`, and a Temurin Java 17 runtime. USB ADB
+access is enabled for the sandbox.
+
+Install Flatpak and the builder, then install the SDK/runtime:
+
+```bash
+sudo apt install flatpak flatpak-builder
+flatpak install flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
+```
+
+Build and run the application:
+
+```bash
+flatpak-builder --user --install --force-clean build \
+  flatpak/io.github.labcif.adbextractorandanalyzer.yml
+flatpak run io.github.labcif.adbextractorandanalyzer
+```
+
+To create a portable private bundle:
+
+```bash
+flatpak-builder --repo=repo --force-clean build \
+  flatpak/io.github.labcif.adbextractorandanalyzer.yml
+flatpak build-bundle repo adbextractorandanalyzer.flatpak \
+  io.github.labcif.adbextractorandanalyzer master
+```
+
+The manifest uses the local checkout as its application source. For a release
+build from the official repository, replace that source with a pinned commit
+from https://github.com/labcif/ADBExtractorAndAnalyzer.
+
 
 ## Authors
 - Guilherme dos Reis Guilherme (https://github.com/guilhermegui08)

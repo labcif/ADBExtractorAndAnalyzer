@@ -6,8 +6,10 @@ Constants, logging, preferences, ADB helpers, and all extraction/analysis logic.
 import hashlib
 import json
 import os
+import shlex
 import signal
 import subprocess
+import sys
 import threading
 import webbrowser
 from datetime import datetime
@@ -21,13 +23,36 @@ from requests_toolbelt.multipart.encoder import MultipartEncoder
 # Constants & Config
 # ---------------------------------------------------------------------------
 
-LOG_FILE = "logs.txt"
-PREFS_FILE = "preferences.json"
+IS_FLATPAK = os.path.exists("/.flatpak-info")
+
+if IS_FLATPAK:
+    _xdg_config_home = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+    _xdg_state_home = os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state"))
+    LOG_FILE = os.path.join(_xdg_state_home, "adbextractorandanalyzer", "logs.txt")
+    PREFS_FILE = os.path.join(_xdg_config_home, "adbextractorandanalyzer", "preferences.json")
+else:
+    LOG_FILE = "logs.txt"
+    PREFS_FILE = "preferences.json"
+
+
+def _bundled_tool(path: str, fallback: str) -> str:
+    return path if os.path.exists(path) else fallback
+
+
+ADB_COMMAND = _bundled_tool("/app/bin/adb", "adb")
+BUNDLED_ALEAPP = _bundled_tool("/app/libexec/aleapp/aleapp.py", "")
+BUNDLED_JADX = _bundled_tool("/app/bin/jadx", "")
+
+if IS_FLATPAK:
+    _xdg_data_home = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
+    DEFAULT_OUTPUT_PATH = os.path.join(_xdg_data_home, "adbextractorandanalyzer", "evidence")
+else:
+    DEFAULT_OUTPUT_PATH = os.path.expanduser("~")
 
 DEFAULT_PREFS = {
-    "aleapp_path": "",
-    "output_path": os.path.expanduser("~"),
-    "jadx_path": "",
+    "aleapp_path": BUNDLED_ALEAPP,
+    "output_path": DEFAULT_OUTPUT_PATH,
+    "jadx_path": BUNDLED_JADX,
     "mobsf_endpoint": "172.22.21.51:8000",
 }
 
@@ -40,6 +65,9 @@ def log(message: str) -> None:
     """Append a timestamped message to the log file and print to terminal."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     formatted = f"[{timestamp}] {message}"
+    log_dir = os.path.dirname(LOG_FILE)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(formatted + "\n")
     print(formatted, flush=True)
@@ -97,7 +125,7 @@ def load_prefs() -> dict:
     log("Loading preferences...")
     default_prefs = dict(DEFAULT_PREFS)
     if not default_prefs.get("output_path"):
-        default_prefs["output_path"] = os.path.expanduser("~")
+        default_prefs["output_path"] = DEFAULT_OUTPUT_PATH
 
     if os.path.exists(PREFS_FILE):
         try:
@@ -107,7 +135,11 @@ def load_prefs() -> dict:
                     loaded = {}
                 prefs = {**default_prefs, **loaded}
                 if not prefs.get("output_path"):
-                    prefs["output_path"] = os.path.expanduser("~")
+                    prefs["output_path"] = DEFAULT_OUTPUT_PATH
+                if not prefs.get("aleapp_path"):
+                    prefs["aleapp_path"] = BUNDLED_ALEAPP
+                if not prefs.get("jadx_path"):
+                    prefs["jadx_path"] = BUNDLED_JADX
                 log(f"Preferences loaded successfully from {PREFS_FILE}: {prefs}")
                 return prefs
         except (json.JSONDecodeError, OSError) as e:
@@ -234,7 +266,7 @@ def get_current_device() -> str | None:
 def list_adb_devices() -> list[str]:
     """Returns a list of connected device IDs from `adb devices`."""
     try:
-        output = subprocess.check_output(["adb", "devices"], stderr=subprocess.STDOUT)
+        output = subprocess.check_output([ADB_COMMAND, "devices"], stderr=subprocess.STDOUT)
         lines = output.decode("utf-8", errors="replace").splitlines()
         devices = []
         for line in lines[1:]:
@@ -255,7 +287,7 @@ def adb_shell_su(command: str) -> str | None:
         log(f"ADB command aborted: no device selected — {command!r}")
         return None
     try:
-        cmd = ["adb", "-s", CURRENT_DEVICE, "shell", "su", "-c", command]
+        cmd = [ADB_COMMAND, "-s", CURRENT_DEVICE, "shell", "su", "-c", command]
         code, output = run_tracked_subprocess(cmd, timeout=60)
         if code != 0:
             log(f"ADB command failed: {command!r} — code {code}, output: {output.decode('utf-8', errors='replace')}")
@@ -274,7 +306,7 @@ def adb_pull(remote: str, local: str | None = None) -> bool:
     if not CURRENT_DEVICE:
         log(f"adb pull aborted: no device selected — {remote}")
         return False
-    cmd = ["adb", "-s", CURRENT_DEVICE, "pull", remote]
+    cmd = [ADB_COMMAND, "-s", CURRENT_DEVICE, "pull", remote]
     if local:
         cmd.append(local)
     try:
@@ -365,13 +397,14 @@ def extract_files_from_device(selected: list[str], output_path: str | None) -> s
     os.makedirs(local_dir, exist_ok=True)
 
     local_archive = os.path.join(local_dir, "search_extract.tar")
-    adb_cmd = f"adb -s {CURRENT_DEVICE}" if CURRENT_DEVICE else "adb"
+    adb_cmd = f"{shlex.quote(ADB_COMMAND)} -s {shlex.quote(CURRENT_DEVICE)}" if CURRENT_DEVICE else shlex.quote(ADB_COMMAND)
 
     # Quote each path to handle spaces or special characters safely
-    quoted_paths = " ".join(f"'{p}'" for p in selected)
+    quoted_paths = " ".join(shlex.quote(p) for p in selected)
 
     # Stream the tar archive directly from the phone to the PC using su for root access
-    cmd = f'{adb_cmd} exec-out su -c "stty raw 2>/dev/null; tar -cf - {quoted_paths} 2>/dev/null" > "{local_archive}"'
+    remote_command = f"stty raw 2>/dev/null; tar -cf - {quoted_paths} 2>/dev/null"
+    cmd = f"{adb_cmd} exec-out su -c {shlex.quote(remote_command)} > {shlex.quote(local_archive)}"
     log(f"Streaming searched files to local tar: {cmd}")
     shell_local(cmd)
 
@@ -493,7 +526,7 @@ def extract_private_data(selected: list[str], output_path: str | None) -> str | 
     local_dir = os.path.join(base, folder_name)
     os.makedirs(local_dir, exist_ok=True)
 
-    adb_cmd = f"adb -s {CURRENT_DEVICE}" if CURRENT_DEVICE else "adb"
+    adb_cmd = f"{shlex.quote(ADB_COMMAND)} -s {shlex.quote(CURRENT_DEVICE)}" if CURRENT_DEVICE else shlex.quote(ADB_COMMAND)
 
     for pkg in selected:
         if is_cancelled():
@@ -501,7 +534,8 @@ def extract_private_data(selected: list[str], output_path: str | None) -> str | 
         local_archive = os.path.join(local_dir, f"{pkg}.tar")
         
         # Stream the tar archive directly from the phone to a local tar file on the PC
-        cmd = f'{adb_cmd} exec-out su -c "stty raw 2>/dev/null; tar -cf - /data/data/{pkg} 2>/dev/null" > "{local_archive}"'
+        remote_command = f"stty raw 2>/dev/null; tar -cf - {shlex.quote(f'/data/data/{pkg}')} 2>/dev/null"
+        cmd = f"{adb_cmd} exec-out su -c {shlex.quote(remote_command)} > {shlex.quote(local_archive)}"
         log(f"Streaming /data/data/{pkg} to local tar")
         shell_local(cmd)
 
@@ -551,7 +585,7 @@ def extract_apk_files(
     local_base = os.path.join(base, folder_name)
     os.makedirs(local_base, exist_ok=True)
 
-    adb_cmd = f"adb -s {CURRENT_DEVICE}" if CURRENT_DEVICE else "adb"
+    adb_cmd = f"{shlex.quote(ADB_COMMAND)} -s {shlex.quote(CURRENT_DEVICE)}" if CURRENT_DEVICE else shlex.quote(ADB_COMMAND)
 
     extracted = []
     for pkg in selected:
@@ -567,7 +601,8 @@ def extract_apk_files(
         local_archive = os.path.join(local_pkg_dir, "pkg.tar")
 
         # Stream the tar archive of the APK directory directly from the phone to the PC
-        cmd = f'{adb_cmd} exec-out su -c "stty raw 2>/dev/null; tar -cf - -C \\"{pkg_dir}\\" . 2>/dev/null" > "{local_archive}"'
+        remote_command = f"stty raw 2>/dev/null; tar -cf - -C {shlex.quote(pkg_dir)} . 2>/dev/null"
+        cmd = f"{adb_cmd} exec-out su -c {shlex.quote(remote_command)} > {shlex.quote(local_archive)}"
         log(f"Streaming APK directory for {pkg} to local tar")
         shell_local(cmd)
 
@@ -617,7 +652,7 @@ def extract_public_data(selected: list[str], output_path: str | None) -> str | N
     local_dir = os.path.join(base, folder_name)
     os.makedirs(local_dir, exist_ok=True)
 
-    adb_cmd = f"adb -s {CURRENT_DEVICE}" if CURRENT_DEVICE else "adb"
+    adb_cmd = f"{shlex.quote(ADB_COMMAND)} -s {shlex.quote(CURRENT_DEVICE)}" if CURRENT_DEVICE else shlex.quote(ADB_COMMAND)
 
     for pkg in selected:
         if is_cancelled():
@@ -625,7 +660,8 @@ def extract_public_data(selected: list[str], output_path: str | None) -> str | N
         local_archive = os.path.join(local_dir, f"{pkg}.tar")
         
         # Stream the tar archive directly from the phone to the PC
-        cmd = f'{adb_cmd} exec-out su -c "stty raw 2>/dev/null; tar -cf - /sdcard/Android/data/{pkg} 2>/dev/null" > "{local_archive}"'
+        remote_command = f"stty raw 2>/dev/null; tar -cf - {shlex.quote(f'/sdcard/Android/data/{pkg}')} 2>/dev/null"
+        cmd = f"{adb_cmd} exec-out su -c {shlex.quote(remote_command)} > {shlex.quote(local_archive)}"
         log(f"Streaming /sdcard/Android/data/{pkg} to local tar")
         shell_local(cmd)
 
@@ -668,9 +704,10 @@ def full_device_dump(output_path: str | None) -> str | None:
     os.makedirs(local_dir, exist_ok=True)
     local_file = os.path.join(local_dir, f"{folder_name}.tar")
 
-    adb_cmd = f"adb -s {CURRENT_DEVICE}" if CURRENT_DEVICE else "adb"
+    adb_cmd = f"{shlex.quote(ADB_COMMAND)} -s {shlex.quote(CURRENT_DEVICE)}" if CURRENT_DEVICE else shlex.quote(ADB_COMMAND)
     # Command matching user's exact specification
-    cmd = f'{adb_cmd} exec-out su -c "stty raw 2>/dev/null; tar -cf - /data /sdcard 2>/dev/null" > "{local_file}"'
+    remote_command = "stty raw 2>/dev/null; tar -cf - /data /sdcard 2>/dev/null"
+    cmd = f"{adb_cmd} exec-out su -c {shlex.quote(remote_command)} > {shlex.quote(local_file)}"
     log(f"Starting full system dump: {cmd}")
     shell_local(cmd)
 
@@ -698,19 +735,41 @@ def full_device_dump(output_path: str | None) -> str | None:
 # ---------------------------------------------------------------------------
 
 def run_aleapp(aleapp_path: str, input_folder: str) -> None:
-    """Run ALEAPP analysis and open the resulting HTML report."""
-    cmd = f"python '{aleapp_path}' -t fs -i '{input_folder}' -o '{input_folder}'"
+    """Run the bundled or configured ALEAPP and open its HTML report."""
+    aleapp_path = aleapp_path or BUNDLED_ALEAPP
+    if not aleapp_path or not os.path.isfile(aleapp_path):
+        log(f"ALEAPP executable not found: {aleapp_path or '(not configured)'}")
+        return
+
+    analysis_base = os.path.join(
+        os.path.dirname(input_folder), f"aleapp_analysis_{_timestamp()}"
+    )
+    os.makedirs(analysis_base, exist_ok=True)
+    cmd = [
+        sys.executable,
+        aleapp_path,
+        "-t", "fs",
+        "-i", input_folder,
+        "-o", analysis_base,
+    ]
     log(f"Running ALEAPP: {cmd}")
-    result = shell_local(cmd)
-    if result:
-        lines = [l for l in result.split("\n") if l.strip()]
-        if lines:
-            output_folder = lines[-1].split("/")[-1]
-            report = os.path.join(input_folder, output_folder, "index.html")
+    try:
+        code, output = run_tracked_subprocess(cmd, timeout=1800)
+    except subprocess.TimeoutExpired:
+        log("ALEAPP timed out.")
+        return
+
+    if code != 0:
+        log(f"ALEAPP failed with exit code {code}: {output.decode('utf-8', errors='replace')}")
+        return
+
+    for root, _dirs, files in os.walk(analysis_base):
+        if "index.html" in files:
+            report = os.path.join(root, "index.html")
             log(f"Opening report: {report}")
             webbrowser.open_new_tab(report)
-    else:
-        log("ALEAPP produced no output.")
+            return
+    log("ALEAPP completed but produced no HTML report.")
 
 
 # ---------------------------------------------------------------------------
@@ -780,9 +839,14 @@ def run_mobsf(endpoint: str, local_base: str, pkgs: list[str]) -> None:
 
 def run_jadx(jadx_path: str, local_base: str, pkgs: list[str]) -> None:
     """Decompile APKs using JADX."""
+    jadx_path = jadx_path or BUNDLED_JADX
+    if not jadx_path or not os.path.isfile(jadx_path):
+        log(f"JADX executable not found: {jadx_path or '(not configured)'}")
+        return
+
     folder_name = f"decompiled_files_{_timestamp()}"
     decompile_base = os.path.join(os.path.dirname(local_base), folder_name)
-    shell_local(f"mkdir -p '{decompile_base}'")
+    os.makedirs(decompile_base, exist_ok=True)
     log(f"JADX: Decompiling into {decompile_base}")
 
     for pkg in pkgs:
@@ -790,7 +854,13 @@ def run_jadx(jadx_path: str, local_base: str, pkgs: list[str]) -> None:
             break
         out_dir = os.path.join(decompile_base, pkg)
         apk = os.path.join(local_base, pkg, "base.apk")
-        shell_local(f"mkdir -p '{out_dir}'")
-        cmd = f"'{jadx_path}' -d '{out_dir}' '{apk}'"
+        os.makedirs(out_dir, exist_ok=True)
+        cmd = [jadx_path, "-d", out_dir, apk]
         log(f"JADX: {cmd}")
-        shell_local(cmd)
+        try:
+            code, output = run_tracked_subprocess(cmd, timeout=1800)
+        except subprocess.TimeoutExpired:
+            log(f"JADX timed out for {apk}")
+            continue
+        if code != 0:
+            log(f"JADX failed for {apk} with exit code {code}: {output.decode('utf-8', errors='replace')}")

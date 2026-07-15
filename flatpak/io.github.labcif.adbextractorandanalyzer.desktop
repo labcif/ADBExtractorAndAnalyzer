@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=ADB Extractor and Analyzer
+Comment=Extract and analyze Android data through ADB
+Exec=adbextractor
+Icon=io.github.labcif.adbextractorandanalyzer
+Terminal=false
+Type=Application
+Categories=Development;
+Keywords=Android;ADB;Forensics;ALEAPP;JADX;
