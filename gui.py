@@ -55,14 +55,17 @@ COLORS = {
 
 ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 ICON_PATH = os.path.join(ASSET_DIR, "icon.png")
+APP_ID = "io.github.labcif.adbextractorandanalyzer"
 
 FONTS = {
-    "title":   ("Consolas", 20, "bold"),
-    "section": ("Consolas", 13, "bold"),
-    "label":   ("Consolas", 10),
-    "button":  ("Consolas", 9, "bold"),
-    "status":  ("Consolas", 9),
-    "log":     ("Consolas", 8),
+    # These fonts are available in the Freedesktop runtime. Consolas is not,
+    # and Tk does not consistently fall back for symbols in a missing font.
+    "title":   ("Noto Sans", 20, "bold"),
+    "section": ("Noto Sans", 13, "bold"),
+    "label":   ("Noto Sans", 10),
+    "button":  ("Noto Sans", 9, "bold"),
+    "status":  ("Noto Sans", 9),
+    "log":     ("Noto Sans Mono", 8),
 }
 
 
@@ -142,11 +145,11 @@ class ChecklistPanel(tk.Frame):
         tk.Label(header, text=title, bg=COLORS["panel"],
                 fg=COLORS["highlight"], font=FONTS["section"]).pack(side=tk.LEFT)
 
-        self._toggle_btn = tk.Button(header, text="☑ All", command=self.toggle_all)
+        self._toggle_btn = tk.Button(header, text="All", command=self.toggle_all)
         _style_button(self._toggle_btn)
         self._toggle_btn.pack(side=tk.RIGHT, padx=2)
 
-        self._apply_btn = tk.Button(header, text="Filter ▶", command=self.populate)
+        self._apply_btn = tk.Button(header, text="Filter >", command=self.populate)
         _style_button(self._apply_btn)
         self._apply_btn.pack(side=tk.RIGHT, padx=2)
 
@@ -379,7 +382,7 @@ class StatusBar(tk.Frame):
         self._progress = ttk.Progressbar(right, mode="indeterminate", length=120)
         self._progress.pack(side=tk.RIGHT, pady=4)
 
-        self._cancel_btn = tk.Button(right, text="✖ Cancel", command=cancel_cmd)
+        self._cancel_btn = tk.Button(right, text="Cancel", command=cancel_cmd)
         _style_button(self._cancel_btn)
         self._cancel_btn.pack(side=tk.RIGHT, padx=(0, 10), pady=2)
         _set_button_state(self._cancel_btn, False)
@@ -410,13 +413,19 @@ class StatusBar(tk.Frame):
 class ADBExtractorApp(tk.Tk):
 
     def __init__(self):
-        super().__init__()
+        # Match the desktop ID so XWayland/Wayland can associate this window
+        # with the exported desktop entry and its icon.
+        super().__init__(className=APP_ID)
         self.title("ADB Extractor & Analyser 2.0")
         self.geometry("1380x860")
         self.minsize(1000, 700)
         self.configure(bg=COLORS["bg"])
 
-        self._app_icon = tk.PhotoImage(file=ICON_PATH)
+        # Keep the WM icon small enough for X11/XWayland to publish while
+        # retaining the full-resolution asset for the desktop icon theme.
+        icon_image = Image.open(ICON_PATH).convert("RGBA")
+        icon_image = icon_image.resize((64, 64), Image.Resampling.LANCZOS)
+        self._app_icon = ImageTk.PhotoImage(icon_image)
         self.iconphoto(True, self._app_icon)
 
         self._prefs = load_prefs()
@@ -463,8 +472,8 @@ class ADBExtractorApp(tk.Tk):
         hdr.pack(fill=tk.X)
         hdr.pack_propagate(False)
 
-        img = Image.open(ICON_PATH)
-        img = img.resize((24, 24))
+        img = Image.open(ICON_PATH).convert("RGBA")
+        img = img.resize((24, 24), Image.Resampling.LANCZOS)
         self._icon_img = ImageTk.PhotoImage(img)
 
         tk.Label(
@@ -491,7 +500,7 @@ class ADBExtractorApp(tk.Tk):
         _style_entry(out_entry)
         out_entry.pack(side=tk.LEFT, padx=4)
 
-        self._browse_btn = tk.Button(out_frame, text="Browse…", command=self._browse_output)
+        self._browse_btn = tk.Button(out_frame, text="Browse...", command=self._browse_output)
         _style_button(self._browse_btn)
         self._browse_btn.pack(side=tk.LEFT, padx=4)
         self._disableable_buttons.append(self._browse_btn)
@@ -508,7 +517,7 @@ class ADBExtractorApp(tk.Tk):
                                      fg=COLORS["text_dim"], font=FONTS["section"])
         self._device_label.pack(side=tk.LEFT, padx=4)
 
-        self._change_btn = tk.Button(dev_frame, text="Change…", command=self._change_device_runtime)
+        self._change_btn = tk.Button(dev_frame, text="Change...", command=self._change_device_runtime)
         _style_button(self._change_btn)
         self._change_btn.pack(side=tk.LEFT, padx=4)
         self._disableable_buttons.append(self._change_btn)
@@ -601,7 +610,7 @@ class ADBExtractorApp(tk.Tk):
         _style_entry(entry)
         entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
 
-        btn = tk.Button(row, text="Browse…", command=browse_cmd)
+        btn = tk.Button(row, text="Browse...", command=browse_cmd)
         _style_button(btn)
         btn.pack(side=tk.LEFT)
         self._disableable_buttons.append(btn)
@@ -750,7 +759,7 @@ class ADBExtractorApp(tk.Tk):
         from core import cancel_active_tasks
         log("User requested cancellation of the running task.")
         cancel_active_tasks()
-        self._status.set("Cancelling task…", busy=True)
+        self._status.set("Cancelling task...", busy=True)
 
     def _update_ui_state(self) -> None:
         enabled = not self._task_running
@@ -800,7 +809,7 @@ class ADBExtractorApp(tk.Tk):
             show_custom_warning("Nothing selected",
                                 "Please select at least one package.", parent=self)
             return
-        self._status.set(f"Extracting {len(selected)} private package(s)…", busy=True)
+        self._status.set(f"Extracting {len(selected)} private package(s)...", busy=True)
         log(f"Extracting private data: {selected}")
         self._run_async(extract_private_data, selected,
                         self._output_var.get() or None)
@@ -816,7 +825,7 @@ class ADBExtractorApp(tk.Tk):
             show_custom_warning("Nothing selected",
                                 "Please select at least one package.", parent=self)
             return
-        self._status.set("Extracting & running ALEAPP…", busy=True)
+        self._status.set("Extracting & running ALEAPP...", busy=True)
 
         def task():
             folder = extract_private_data(selected, self._output_var.get() or None)
@@ -835,7 +844,7 @@ class ADBExtractorApp(tk.Tk):
             show_custom_warning("Nothing selected",
                                 "Please select at least one APK.", parent=self)
             return
-        self._status.set(f"Extracting {len(selected)} APK(s)…", busy=True)
+        self._status.set(f"Extracting {len(selected)} APK(s)...", busy=True)
         self._run_async(extract_apk_files, selected, self._apk_dir_map,
                         self._output_var.get() or None)
 
@@ -846,7 +855,7 @@ class ADBExtractorApp(tk.Tk):
                                 "Please select at least one APK.", parent=self)
             return
         endpoint = self._mobsf_var.get().strip() or DEFAULT_PREFS["mobsf_endpoint"]
-        self._status.set("Extracting & scanning with MobSF…", busy=True)
+        self._status.set("Extracting & scanning with MobSF...", busy=True)
 
         def task():
             base, pkgs = extract_apk_files(selected, self._apk_dir_map,
@@ -866,7 +875,7 @@ class ADBExtractorApp(tk.Tk):
             show_custom_warning("Nothing selected",
                                 "Please select at least one APK.", parent=self)
             return
-        self._status.set("Extracting & decompiling with JADX…", busy=True)
+        self._status.set("Extracting & decompiling with JADX...", busy=True)
 
         def task():
             base, pkgs = extract_apk_files(selected, self._apk_dir_map,
@@ -885,7 +894,7 @@ class ADBExtractorApp(tk.Tk):
             show_custom_warning("Nothing selected",
                                 "Please select at least one package.", parent=self)
             return
-        self._status.set(f"Extracting {len(selected)} public package(s)…", busy=True)
+        self._status.set(f"Extracting {len(selected)} public package(s)...", busy=True)
         log(f"Extracting public data: {selected}")
         self._run_async(extract_public_data, selected,
                         self._output_var.get() or None)
@@ -899,7 +908,7 @@ class ADBExtractorApp(tk.Tk):
             show_custom_warning("No Device", "Please select a device before performing a full dump.", parent=self)
             return
 
-        self._status.set("Creating full device dump…", busy=True)
+        self._status.set("Creating full device dump...", busy=True)
 
         def task():
             try:
@@ -924,7 +933,7 @@ class ADBExtractorApp(tk.Tk):
             show_custom_warning("Nothing selected",
                                 "Please select at least one file from Search Results.", parent=self)
             return
-        self._status.set(f"Extracting {len(selected)} search file(s)…", busy=True)
+        self._status.set(f"Extracting {len(selected)} search file(s)...", busy=True)
         self._run_async(extract_files_from_device, selected, self._output_var.get() or None)
 
     # ------------------------------------------------------------------
@@ -1062,7 +1071,7 @@ class DeviceSelectorDialog(tk.Toplevel):
         )
         self._dev_menu.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
         
-        refresh_btn = tk.Button(drop_frame, text="↻ Refresh", command=self._refresh_devices)
+        refresh_btn = tk.Button(drop_frame, text="Refresh", command=self._refresh_devices)
         _style_button(refresh_btn)
         refresh_btn.pack(side=tk.RIGHT)
         
@@ -1177,13 +1186,13 @@ class CustomMessageBox(tk.Toplevel):
         hdr.pack(fill=tk.X)
         hdr.pack_propagate(False)
         
-        icon = "ℹ"
+        icon = "INFO"
         icon_color = COLORS["success"]
         if self.type_ == "warning":
-            icon = "⚠"
+            icon = "WARNING"
             icon_color = COLORS["warning"]
         elif self.type_ == "error":
-            icon = "✖"
+            icon = "ERROR"
             icon_color = COLORS["highlight"]
             
         lbl = tk.Label(
@@ -1284,11 +1293,11 @@ class CustomFileDialog(tk.Toplevel):
         nav = tk.Frame(self, bg=COLORS["bg"], padx=15, pady=8)
         nav.pack(fill=tk.X)
         
-        up_btn = tk.Button(nav, text="📁 ⬉ Up", command=self._go_up)
+        up_btn = tk.Button(nav, text="Up", command=self._go_up)
         _style_button(up_btn)
         up_btn.pack(side=tk.LEFT, padx=(0, 5))
         
-        home_btn = tk.Button(nav, text="🏠 Home", command=self._go_home)
+        home_btn = tk.Button(nav, text="Home", command=self._go_home)
         _style_button(home_btn)
         home_btn.pack(side=tk.LEFT, padx=(0, 5))
         
@@ -1420,7 +1429,7 @@ class CustomFileDialog(tk.Toplevel):
         files.sort(key=str.lower)
         
         for d in dirs:
-            self._tree.insert("", "end", values=(f"📁 {d}", "Folder", ""))
+            self._tree.insert("", "end", values=(f"[D] {d}", "Folder", ""))
             
         for f in files:
             full_path = os.path.join(self.current_dir, f)
@@ -1429,7 +1438,7 @@ class CustomFileDialog(tk.Toplevel):
                 sz_str = self._format_size(sz_bytes)
             except OSError:
                 sz_str = "Unknown"
-            self._tree.insert("", "end", values=(f"📄 {f}", "File", sz_str))
+            self._tree.insert("", "end", values=(f"[F] {f}", "File", sz_str))
             
     def _format_size(self, size_bytes: int) -> str:
         for unit in ["B", "KB", "MB", "GB"]:
