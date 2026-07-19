@@ -44,6 +44,7 @@ def _bundled_tool(path: str, fallback: str) -> str:
 ADB_COMMAND = _bundled_tool("/app/bin/adb", "adb")
 BUNDLED_ALEAPP = _bundled_tool("/app/libexec/aleapp/aleapp.py", "")
 BUNDLED_JADX = _bundled_tool("/app/bin/jadx", "")
+BUNDLED_ROOTAVD = _bundled_tool("/app/libexec/rootavd/rootAVD.sh", "")
 
 if IS_FLATPAK:
     _xdg_data_home = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
@@ -56,7 +57,7 @@ DEFAULT_PREFS = {
     "output_path": DEFAULT_OUTPUT_PATH,
     "jadx_path": BUNDLED_JADX,
     "mobsf_endpoint": "172.22.21.51:8000",
-    "rootavd_path": "",
+    "rootavd_path": BUNDLED_ROOTAVD,
 }
 
 
@@ -493,20 +494,39 @@ def launch_rootavd(rootavd_path: str, ramdisk_path: str) -> bool:
     sdk_root, image_suffix = absolute_ramdisk.split(marker, 1)
     rootavd_ramdisk = f"system-images/{image_suffix.replace(os.sep, '/')}"
 
-    terminal = shutil.which("x-terminal-emulator") or shutil.which("gnome-terminal") or shutil.which("xterm")
+    terminal = "x-terminal-emulator" if IS_FLATPAK else (
+        shutil.which("x-terminal-emulator") or shutil.which("gnome-terminal") or shutil.which("xterm")
+    )
     if not terminal:
         log("Could not launch RootAVD: no supported terminal emulator was found.")
         return False
 
     rootavd_dir = os.path.dirname(os.path.abspath(rootavd_path))
+    launch_script = rootavd_path
+    if IS_FLATPAK and rootavd_path == BUNDLED_ROOTAVD:
+        # Host terminals cannot access /app, so copy the bundled, writable
+        # RootAVD workspace to the application's persistent data directory.
+        data_home = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
+        host_rootavd_dir = os.path.join(data_home, "adbextractorandanalyzer", "rootavd")
+        try:
+            shutil.copytree(rootavd_dir, host_rootavd_dir, dirs_exist_ok=True)
+        except OSError as exc:
+            log(f"Could not prepare bundled RootAVD workspace: {exc}")
+            return False
+        rootavd_dir = host_rootavd_dir
+        launch_script = os.path.join(rootavd_dir, "rootAVD.sh")
+
     command = (
         f"export ANDROID_HOME={shlex.quote(sdk_root)}; "
         "export PATH=\"$ANDROID_HOME/platform-tools:$PATH\"; "
-        f"cd {shlex.quote(rootavd_dir)} && bash {shlex.quote(rootavd_path)} {shlex.quote(rootavd_ramdisk)}; "
+        f"cd {shlex.quote(rootavd_dir)} && bash {shlex.quote(launch_script)} {shlex.quote(rootavd_ramdisk)}; "
         "status=$?; printf '\\nRootAVD finished with status %s. Press Enter to close.\\n' \"$status\"; read _"
     )
     try:
-        subprocess.Popen([terminal, "-e", "bash", "-lc", command], start_new_session=True)
+        terminal_command = [terminal, "-e", "bash", "-lc", command]
+        if IS_FLATPAK:
+            terminal_command = ["flatpak-spawn", "--host", *terminal_command]
+        subprocess.Popen(terminal_command, start_new_session=True)
     except OSError as exc:
         log(f"Could not launch RootAVD: {exc}")
         return False

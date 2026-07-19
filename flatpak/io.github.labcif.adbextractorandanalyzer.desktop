@@ -6,5 +6,6 @@ Icon=io.github.labcif.adbextractorandanalyzer
 StartupWMClass=io.github.labcif.adbextractorandanalyzer
 Terminal=false
 Type=Application
-Categories=Development;
+StartupNotify=true
+Categories=Development;Utility;
 Keywords=Android;ADB;Forensics;ALEAPP;JADX;

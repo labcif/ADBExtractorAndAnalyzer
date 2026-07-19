@@ -44,4 +44,6 @@ logs.txt
 .flatpak-builder/
 build/
 repo/
+build-*/
+repo-*/
 *.flatpak

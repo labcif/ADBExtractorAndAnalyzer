@@ -5,13 +5,15 @@ sdk: org.freedesktop.Sdk
 command: adbextractor
 
 # Private distribution permissions:
-# - Tkinter uses X11.
+# - Tkinter currently uses X11 through XWayland, while Wayland access allows
+#   correct session integration on modern desktops.
 # - USB ADB requires access to the Android device node. `all` is used because
 #   the installed Flatpak version predates the narrower `usb` permission.
 # - home/media access preserves the existing evidence-folder chooser.
 # - network is required for remote MobSF and optional TCP ADB.
 finish-args:
   - --socket=x11
+  - --socket=wayland
   - --share=ipc
   - --device=all
   - --share=network
@@ -19,6 +21,7 @@ finish-args:
   - --filesystem=/media
   - --filesystem=/mnt
   - --filesystem=/run/media
+  - --talk-name=org.freedesktop.Flatpak
 
 modules:
   - name: python-dependencies
@@ -80,6 +83,17 @@ modules:
         url: https://github.com/abrignoni/ALEAPP.git
         tag: v2026.1.0
         commit: fbc2b672ce757dd94e36eeab847eb138f745551f
+
+  - name: rootavd
+    buildsystem: simple
+    build-commands:
+      - install -d /app/libexec/rootavd
+      - cp -a . /app/libexec/rootavd/
+      - install -Dm644 LICENSE /app/share/licenses/adbextractor-rootavd/LICENSE
+    sources:
+      - type: git
+        url: https://gitlab.com/newbit/rootAVD.git
+        commit: 613caa44371f85e1a461bc030e07ddc2d71afe32
 
   - name: adbextractorandanalyzer
     buildsystem: simple
