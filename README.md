@@ -4,8 +4,13 @@
 ADB Extractor and Analyzer is a Linux desktop application for collecting Android data through ADB. It is intended for lab work and forensic examination of physical devices and Android Studio emulators.
 
 The application can collect private app data, shared-storage app data, APKs, selected files, and logical device dumps. Rooted devices are acquired through a detected root interface. On a non-rooted device, the available actions are limited to data accessible to the ADB shell; a Full Dump collects readable shared storage only.
-<img width="1922" height="1052" alt="imagem" src="https://github.com/user-attachments/assets/b45c150b-62a4-484c-ac4b-8d996c5a2a01" />
 
+<p align="center">
+  <img src="assets/icon.png"
+       alt="ADB Extractor and Analyzer logo"
+       width="512"
+       height="512">
+</p>
 
 ---
 
@@ -18,6 +23,7 @@ The application can collect private app data, shared-storage app data, APKs, sel
 - Device-side SHA-256 manifests where the selected acquisition method can read the source files, local MD5/SHA-256 manifests, and acquisition metadata.
 - ALEAPP filesystem analysis for private-data extractions and full dumps.
 
+<img width="1922" height="1052" alt="imagem" src="https://github.com/user-attachments/assets/b45c150b-62a4-484c-ac4b-8d996c5a2a01" />
 
 ## Requirements
 - Python 3.x (3.10 recommended)
