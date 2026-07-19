@@ -3,6 +3,7 @@
   <id>io.github.labcif.adbextractorandanalyzer</id>
   <name>ADB Extractor and Analyzer</name>
   <summary>Extract and analyze Android data through ADB</summary>
+  <icon type="stock">io.github.labcif.adbextractorandanalyzer</icon>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-only</project_license>
   <developer id="io.github.labcif">
@@ -11,7 +12,8 @@
   <description>
     <p>
       Extract public, private, APK, and selected Android data through ADB,
-      generate integrity hashes, and analyze results with ALEAPP and JADX.
+      generate integrity hashes, analyze results with ALEAPP and JADX, and root
+      compatible Android Studio virtual devices with bundled RootAVD.
     </p>
   </description>
   <launchable type="desktop-id">io.github.labcif.adbextractorandanalyzer.desktop</launchable>
