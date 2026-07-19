@@ -1,18 +1,22 @@
 # ADBExtractorAndAnalyzer 
 
 ## Overview
-This Python program provides a comprehensive solution for extracting, analyzing, and decompiling data from Android devices using ADB (Android Debug Bridge) shell commands. It facilitates the extraction of public, private, and APK data from Android devices, followed by analysis and decompilation using JADX, ALEAPP, and MobSF.
+ADB Extractor and Analyzer is a Linux desktop application for collecting Android data through ADB. It is intended for lab work and forensic examination of physical devices and Android Studio emulators.
+
+The application can collect private app data, shared-storage app data, APKs, selected files, and logical device dumps. Rooted devices are acquired through a detected root interface. On a non-rooted device, the available actions are limited to data accessible to the ADB shell; a Full Dump collects readable shared storage only.
 <img width="1922" height="1052" alt="imagem" src="https://github.com/user-attachments/assets/b45c150b-62a4-484c-ac4b-8d996c5a2a01" />
 
 
 ---
 
 ## Features
-- **Data Extraction:** All public, private, APK, search, and full-dump extractions are treated as forensic acquisitions and use ADB shell commands.
-- **Evidence Manifests:** Records device and package metadata plus device-side SHA-256 hashes before transfer.
-- **Data Analysis:** Utilizes ALEAPP, and MobSF for analyzing the extracted data.
-- **Decompilation:** Decompiles APK files using JADX to provide insights into their inner workings.
-- **User-Friendly Interface:** Offers a user-friendly interface for ease of use.
+- Private data extraction from `/data/data` on rooted devices.
+- Public app-data extraction from `/sdcard/Android/data`.
+- APK extraction, MobSF scanning, and JADX decompilation.
+- File search and extraction from `/data` and `/sdcard` when root is available; `/sdcard` only without root.
+- Full logical dumps of `/data`, `/sdcard`, and `/data_mirror` on rooted devices; readable `/sdcard` data without root.
+- Device-side SHA-256 manifests where the selected acquisition method can read the source files, local MD5/SHA-256 manifests, and acquisition metadata.
+- ALEAPP filesystem analysis for private-data extractions and full dumps.
 
 
 ## Requirements
@@ -31,9 +35,8 @@ Standard Android Studio images usually do not meet this requirement:
 
 - **Google Play images** use production-style builds and normally cannot be
   rooted with the standard AVD configuration.
-- **Google APIs images** may support `adb root` on some system-image builds,
-and can therefore be acquired directly. A root-enabled image or a properly
-configured root solution is still required for production-style builds.
+- **Google APIs images** may support `adb root`, depending on the system image.
+  Production-style builds still require a separate root solution.
 
 Without root, the application may connect to the emulator and list the device,
 but private data extraction is unavailable. Full Dump automatically becomes an
@@ -54,13 +57,14 @@ by `adb shell id` is also supported.
 
 ### Rooting an Android Studio AVD
 When a selected emulator has no root interface, the application offers a guided
-RootAVD launcher. Download RootAVD separately from
-https://gitlab.com/newbit/rootAVD, then select its `rootAVD.sh` script and the
-application resolves the AVD system-image `ramdisk.img` (or
-`ramdisk-qemu.img`) from the selected emulator's AVD configuration. RootAVD
-opens in a terminal because its Magisk selection is interactive. Back up the
-AVD system image, complete the terminal workflow, restart the emulator, and
-select it again in the application.
+RootAVD launcher. The Flatpak bundle includes RootAVD; for a source checkout,
+select `rootAVD.sh` from a RootAVD installation. The application resolves the
+AVD system-image `ramdisk.img` or `ramdisk-qemu.img` from the selected
+emulator's configuration and Android SDK.
+
+RootAVD modifies the AVD system image and runs interactively in a terminal.
+Back up the AVD first. Complete the RootAVD workflow, restart the emulator,
+then select it again in the application.
 
 
 ## Dependencies
@@ -97,12 +101,12 @@ python main.py
 ## OS
 Developed for Linux.
 
-## Private Flatpak build
-The repository includes a private Flatpak manifest under `flatpak/`. It bundles
-the application dependencies, ALEAPP, Android platform-tools, JADX, and a Java
-runtime for JADX. The manifest currently pins ALEAPP `v2026.1.0`, Android
-platform-tools `r37.0.1`, JADX `1.5.6`, and a Temurin Java 17 runtime. USB ADB
-access is enabled for the sandbox.
+## Flatpak
+The Flatpak manifest is `flatpak/io.github.labcif.adbextractorandanalyzer.yml`.
+It bundles ALEAPP, JADX, Android platform-tools, a Java runtime, and RootAVD.
+It has access to USB ADB devices, the home directory, removable-media mount
+points, X11/XWayland, and Wayland session integration. RootAVD uses a host
+terminal because it must modify the host AVD system image.
 
 Install Flatpak and the builder, then install the SDK/runtime:
 
@@ -119,18 +123,17 @@ flatpak-builder --user --install --force-clean build \
 flatpak run io.github.labcif.adbextractorandanalyzer
 ```
 
-To create a portable private bundle:
+To create the portable bundle:
 
 ```bash
-flatpak-builder --repo=repo --force-clean build \
+flatpak-builder --repo=repo-current --force-clean build \
   flatpak/io.github.labcif.adbextractorandanalyzer.yml
-flatpak build-bundle repo adbextractorandanalyzer.flatpak \
+flatpak build-bundle repo-current adbextractorandanalyzer.flatpak \
   io.github.labcif.adbextractorandanalyzer master
 ```
 
-The manifest uses the local checkout as its application source. For a release
-build from the official repository, replace that source with a pinned commit
-from https://github.com/labcif/ADBExtractorAndAnalyzer.
+`adbextractorandanalyzer.flatpak` is the only portable bundle maintained in
+the project root. The manifest builds from the local checkout.
 
 
 ## Authors
