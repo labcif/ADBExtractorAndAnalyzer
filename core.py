@@ -7,9 +7,11 @@ import hashlib
 import json
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
+import tarfile
 import threading
 import webbrowser
 from datetime import datetime
@@ -728,6 +730,40 @@ def full_device_dump(output_path: str | None) -> str | None:
     else:
         log("Full logical dump failed (output file empty or not found).")
         return None
+
+
+def extract_full_dump_for_aleapp(dump_archive: str) -> str | None:
+    """Extract a full-dump archive to a filesystem directory for ALEAPP."""
+    input_dir = os.path.join(
+        os.path.dirname(dump_archive), f"aleapp_input_{_timestamp()}"
+    )
+    os.makedirs(input_dir, exist_ok=True)
+
+    try:
+        with tarfile.open(dump_archive) as archive:
+            for member in archive:
+                member_path = os.path.abspath(os.path.join(input_dir, member.name))
+                if (
+                    not member_path.startswith(os.path.abspath(input_dir) + os.sep)
+                    or not (member.isdir() or member.isreg())
+                ):
+                    log(f"Skipping unsafe full-dump archive member: {member.name}")
+                    continue
+                # The dump records Android's restrictive ownership and modes.
+                # This is an ALEAPP working copy; keep its directories readable.
+                archive.extract(member, input_dir, set_attrs=False)
+    except (OSError, tarfile.TarError) as exc:
+        shutil.rmtree(input_dir, ignore_errors=True)
+        log(f"Could not extract full dump for ALEAPP: {exc}")
+        return None
+
+    if is_cancelled():
+        shutil.rmtree(input_dir, ignore_errors=True)
+        log("Full-dump ALEAPP input preparation cancelled: extracted files removed.")
+        return None
+
+    log(f"Full dump extracted for ALEAPP → {input_dir}")
+    return input_dir
 
 
 # ---------------------------------------------------------------------------

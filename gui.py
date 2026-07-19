@@ -26,6 +26,7 @@ from core import (
     run_mobsf,
     save_prefs,
     full_device_dump,
+    extract_full_dump_for_aleapp,
     get_last_log_line,
     set_current_device,
     get_current_device,
@@ -527,6 +528,13 @@ class ADBExtractorApp(tk.Tk):
         self._dump_btn.pack(side=tk.LEFT, padx=(12, 4))
         self._disableable_buttons.append(self._dump_btn)
 
+        self._dump_aleapp_btn = tk.Button(
+            dev_frame, text="Full Dump + ALEAPP", command=self._do_full_dump_and_aleapp
+        )
+        _style_button(self._dump_aleapp_btn)
+        self._dump_aleapp_btn.pack(side=tk.LEFT, padx=4)
+        self._disableable_buttons.append(self._dump_aleapp_btn)
+
     def _build_columns(self) -> None:
         body = tk.Frame(self, bg=COLORS["bg"])
         body.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
@@ -920,6 +928,33 @@ class ADBExtractorApp(tk.Tk):
             except Exception as e:
                 log(f"Full dump failed: {e}")
                 self.after(0, lambda: show_custom_error("Error", str(e), parent=self))
+
+        self._run_async(task)
+
+    def _do_full_dump_and_aleapp(self) -> None:
+        if not get_current_device():
+            show_custom_warning("No Device", "Please select a device before performing a full dump.", parent=self)
+            return
+        aleapp = self._aleapp_path_var.get().strip()
+        if not aleapp:
+            show_custom_error("ALEAPP not set",
+                              "Please select the ALEAPP script path.", parent=self)
+            return
+
+        self._status.set("Creating full dump & running ALEAPP...", busy=True)
+
+        def task():
+            dump_archive = full_device_dump(self._output_var.get() or None)
+            if not dump_archive:
+                self.after(0, lambda: show_custom_error("Error", "Full dump failed. Check logs.txt for details.", parent=self))
+                return
+
+            input_dir = extract_full_dump_for_aleapp(dump_archive)
+            if not input_dir:
+                self.after(0, lambda: show_custom_error("Error", "Could not prepare the full dump for ALEAPP. Check logs.txt for details.", parent=self))
+                return
+
+            run_aleapp(aleapp, input_dir)
 
         self._run_async(task)
 
@@ -1477,7 +1512,7 @@ class CustomFileDialog(tk.Toplevel):
         if not sel:
             return
         vals = self._tree.item(sel[0], "values")
-        name = vals[0][2:]
+        name = vals[0][4:]
         full_path = os.path.join(self.current_dir, name)
         
         if vals[1] == "Folder":
@@ -1500,7 +1535,7 @@ class CustomFileDialog(tk.Toplevel):
             return
             
         vals = self._tree.item(sel[0], "values")
-        name = vals[0][2:]
+        name = vals[0][4:]
         full_path = os.path.join(self.current_dir, name)
         
         if self.is_directory_only:
