@@ -56,6 +56,7 @@ DEFAULT_PREFS = {
     "output_path": DEFAULT_OUTPUT_PATH,
     "jadx_path": BUNDLED_JADX,
     "mobsf_endpoint": "172.22.21.51:8000",
+    "rootavd_path": "",
 }
 
 
@@ -166,6 +167,7 @@ def save_prefs(prefs: dict) -> None:
 # ---------------------------------------------------------------------------
 
 CURRENT_DEVICE: str | None = None
+ROOT_METHODS: dict[str, str] = {}
 
 ACTIVE_SUBPROCESSES: list[subprocess.Popen] = []
 SUBPROCESS_LOCK = threading.Lock()
@@ -283,14 +285,278 @@ def list_adb_devices() -> list[str]:
         return []
 
 
+def _run_adb_shell(command: str, root_method: str = "shell") -> tuple[int, bytes]:
+    """Run an ADB shell command using the requested root method."""
+    if not CURRENT_DEVICE:
+        return 1, b"No device selected"
+
+    cmd = [ADB_COMMAND, "-s", CURRENT_DEVICE, "shell"]
+    if root_method == "su_c":
+        cmd.extend(["su", "-c", command])
+    elif root_method == "su_0_c":
+        cmd.extend(["su", "0", "-c", command])
+    elif root_method == "su_0":
+        cmd.extend(["su", "0", command])
+    else:
+        cmd.append(command)
+    return run_tracked_subprocess(cmd, timeout=60)
+
+
+def _detect_root_method() -> str:
+    """Detect one usable root command form for the current device."""
+    if not CURRENT_DEVICE:
+        return "NONE"
+    if CURRENT_DEVICE in ROOT_METHODS:
+        return ROOT_METHODS[CURRENT_DEVICE]
+
+    def works(method: str) -> bool:
+        try:
+            code, output = _run_adb_shell("id", method)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+        return code == 0 and "uid=0" in output.decode("utf-8", errors="replace")
+
+    # `adb root` is harmless on production devices and enables direct exec-out
+    # acquisition on userdebug emulators when supported.
+    try:
+        run_tracked_subprocess([ADB_COMMAND, "-s", CURRENT_DEVICE, "root"], timeout=15)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    for method in ("shell_root", "su_c", "su_0_c", "su_0"):
+        if works(method):
+            ROOT_METHODS[CURRENT_DEVICE] = method
+            log(f"Root method detected for {CURRENT_DEVICE}: {method}")
+            return method
+
+    ROOT_METHODS[CURRENT_DEVICE] = "NONE"
+    log(f"No usable root method detected for {CURRENT_DEVICE}.")
+    return "NONE"
+
+
+def is_android_virtual_device() -> bool:
+    """Return whether the selected ADB target identifies as an Android emulator."""
+    if not CURRENT_DEVICE:
+        return False
+    if CURRENT_DEVICE.startswith("emulator-"):
+        return True
+    try:
+        code, output = _run_adb_shell("getprop ro.kernel.qemu")
+        return code == 0 and output.decode("utf-8", errors="replace").strip() == "1"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def adb_shell(command: str) -> str | None:
+    """Run a shell command without root and return stdout."""
+    if not CURRENT_DEVICE:
+        return None
+    try:
+        code, output = _run_adb_shell(command)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    return output.decode("utf-8", errors="replace") if code == 0 else None
+
+
+def find_selected_avd_ramdisk() -> str | None:
+    """Resolve the selected emulator's system-image ramdisk from its AVD config."""
+    if not is_android_virtual_device():
+        return None
+    avd_name = ""
+    for property_name in ("ro.boot.qemu.avd_name", "ro.kernel.qemu.avd_name"):
+        avd_name = (adb_shell(f"getprop {property_name}") or "").strip()
+        if avd_name:
+            break
+    if not avd_name:
+        log("Could not determine the selected emulator's AVD name.")
+        return None
+
+    android_user_home = os.environ.get("ANDROID_USER_HOME", os.path.expanduser("~/.android"))
+    avd_roots = [
+        os.environ.get("ANDROID_AVD_HOME", ""),
+        os.path.join(os.environ["ANDROID_EMULATOR_HOME"], "avd")
+        if os.environ.get("ANDROID_EMULATOR_HOME") else "",
+        os.path.join(android_user_home, "avd"),
+        os.path.expanduser("~/.android/avd"),
+        os.path.expanduser("~/snap/android-studio/common/.android/avd"),
+        os.path.expanduser("~/.var/app/com.google.AndroidStudio/config/.android/avd"),
+    ]
+    config_path = ""
+    for avd_root in dict.fromkeys(os.path.abspath(path) for path in avd_roots if path):
+        direct_config = os.path.join(avd_root, f"{avd_name}.avd", "config.ini")
+        if os.path.isfile(direct_config):
+            config_path = direct_config
+            break
+        pointer_path = os.path.join(avd_root, f"{avd_name}.ini")
+        try:
+            with open(pointer_path, encoding="utf-8") as pointer_file:
+                pointer = dict(
+                    line.strip().split("=", 1) for line in pointer_file
+                    if "=" in line and not line.lstrip().startswith("#")
+                )
+            avd_path = os.path.expanduser(pointer.get("path", ""))
+            if avd_path and not os.path.isabs(avd_path):
+                avd_path = os.path.join(avd_root, avd_path)
+            candidate = os.path.join(avd_path, "config.ini")
+            if avd_path and os.path.isfile(candidate):
+                config_path = candidate
+                break
+        except OSError:
+            continue
+
+    if not config_path:
+        return _find_ramdisk_by_running_image(avd_name)
+
+    try:
+        with open(config_path, encoding="utf-8") as config_file:
+            config = dict(
+                line.strip().split("=", 1) for line in config_file
+                if "=" in line and not line.lstrip().startswith("#")
+            )
+    except OSError as exc:
+        log(f"Could not read AVD config for {avd_name}: {exc}")
+        return None
+
+    system_dir = config.get("image.sysdir.1", "").strip().strip("/")
+    if not system_dir:
+        log(f"AVD config for {avd_name} has no image.sysdir.1 entry.")
+        return None
+    if system_dir.startswith("system-images/"):
+        system_dir = system_dir[len("system-images/"):]
+    configured_sdk = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
+    sdk_roots = [configured_sdk] if configured_sdk else [os.path.expanduser("~/Android/Sdk")]
+    for sdk_root in sdk_roots:
+        if not sdk_root:
+            continue
+        image_dir = os.path.join(sdk_root, "system-images", system_dir)
+        for filename in ("ramdisk.img", "ramdisk-qemu.img"):
+            ramdisk_path = os.path.join(image_dir, filename)
+            if os.path.isfile(ramdisk_path):
+                log(f"Resolved RootAVD ramdisk for {avd_name}: {ramdisk_path}")
+                return ramdisk_path
+
+    log(f"Could not find a ramdisk image for AVD {avd_name} ({system_dir}).")
+    return None
+
+
+def _find_ramdisk_by_running_image(avd_name: str) -> str | None:
+    """Fall back to one unambiguous SDK image matching the running emulator."""
+    api_level = (adb_shell("getprop ro.build.version.sdk") or "").strip()
+    abi = (adb_shell("getprop ro.product.cpu.abi") or "").strip()
+    if not api_level or not abi:
+        log(f"Could not determine API level and ABI for AVD {avd_name}.")
+        return None
+
+    configured_sdk = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
+    sdk_roots = [configured_sdk] if configured_sdk else [os.path.expanduser("~/Android/Sdk")]
+    candidates = []
+    for sdk_root in sdk_roots:
+        image_root = os.path.join(sdk_root, "system-images", f"android-{api_level}")
+        if not os.path.isdir(image_root):
+            continue
+        for tag in os.listdir(image_root):
+            image_dir = os.path.join(image_root, tag, abi)
+            for filename in ("ramdisk.img", "ramdisk-qemu.img"):
+                ramdisk_path = os.path.join(image_dir, filename)
+                if os.path.isfile(ramdisk_path):
+                    candidates.append(ramdisk_path)
+
+    if len(candidates) == 1:
+        log(f"Resolved RootAVD ramdisk by API/ABI fallback for {avd_name}: {candidates[0]}")
+        return candidates[0]
+    if candidates:
+        log(f"Could not safely choose one ramdisk for {avd_name}; matching images: {candidates}")
+    else:
+        log(f"No SDK ramdisk matches AVD {avd_name} (API {api_level}, ABI {abi}).")
+    return None
+
+
+def has_root_access() -> bool:
+    """Return whether a supported root interface is available on the selected device."""
+    return _detect_root_method() != "NONE"
+
+
+def launch_rootavd(rootavd_path: str, ramdisk_path: str) -> bool:
+    """Launch RootAVD in a terminal to patch a running Android Studio AVD."""
+    if not os.path.isfile(rootavd_path):
+        log(f"RootAVD script not found: {rootavd_path}")
+        return False
+    if not os.path.isfile(ramdisk_path):
+        log(f"AVD ramdisk image not found: {ramdisk_path}")
+        return False
+
+    marker = f"{os.sep}system-images{os.sep}"
+    absolute_ramdisk = os.path.abspath(ramdisk_path)
+    if marker not in absolute_ramdisk:
+        log(f"Could not determine Android SDK root from ramdisk path: {ramdisk_path}")
+        return False
+    sdk_root, image_suffix = absolute_ramdisk.split(marker, 1)
+    rootavd_ramdisk = f"system-images/{image_suffix.replace(os.sep, '/')}"
+
+    terminal = shutil.which("x-terminal-emulator") or shutil.which("gnome-terminal") or shutil.which("xterm")
+    if not terminal:
+        log("Could not launch RootAVD: no supported terminal emulator was found.")
+        return False
+
+    rootavd_dir = os.path.dirname(os.path.abspath(rootavd_path))
+    command = (
+        f"export ANDROID_HOME={shlex.quote(sdk_root)}; "
+        "export PATH=\"$ANDROID_HOME/platform-tools:$PATH\"; "
+        f"cd {shlex.quote(rootavd_dir)} && bash {shlex.quote(rootavd_path)} {shlex.quote(rootavd_ramdisk)}; "
+        "status=$?; printf '\\nRootAVD finished with status %s. Press Enter to close.\\n' \"$status\"; read _"
+    )
+    try:
+        subprocess.Popen([terminal, "-e", "bash", "-lc", command], start_new_session=True)
+    except OSError as exc:
+        log(f"Could not launch RootAVD: {exc}")
+        return False
+
+    if CURRENT_DEVICE:
+        ROOT_METHODS.pop(CURRENT_DEVICE, None)
+    log(f"Launched RootAVD for ramdisk image: {ramdisk_path}")
+    return True
+
+
+def _root_exec_out_command(remote_command: str) -> str | None:
+    """Build a shell command that streams a root command through adb exec-out."""
+    if not CURRENT_DEVICE:
+        log("ADB exec-out aborted: no device selected.")
+        return None
+    method = _detect_root_method()
+    if method == "NONE":
+        log("ADB exec-out aborted: no usable root method detected.")
+        return None
+
+    adb_cmd = f"{shlex.quote(ADB_COMMAND)} -s {shlex.quote(CURRENT_DEVICE)} exec-out"
+    if method == "su_c":
+        return f"{adb_cmd} su -c {shlex.quote(remote_command)}"
+    if method == "su_0_c":
+        return f"{adb_cmd} su 0 -c {shlex.quote(remote_command)}"
+    if method == "su_0":
+        return f"{adb_cmd} su 0 {shlex.quote(remote_command)}"
+    return f"{adb_cmd} {shlex.quote(remote_command)}"
+
+
+def _adb_exec_out_command(remote_command: str) -> str | None:
+    """Build an adb exec-out command without requiring root."""
+    if not CURRENT_DEVICE:
+        log("ADB exec-out aborted: no device selected.")
+        return None
+    adb_cmd = f"{shlex.quote(ADB_COMMAND)} -s {shlex.quote(CURRENT_DEVICE)} exec-out"
+    return f"{adb_cmd} {shlex.quote(remote_command)}"
+
+
 def adb_shell_su(command: str) -> str | None:
-    """Run a command via `adb shell su -c`. Returns stdout or None on error."""
+    """Run a command with a detected root method. Returns stdout or None on error."""
     if not CURRENT_DEVICE:
         log(f"ADB command aborted: no device selected — {command!r}")
         return None
+    method = _detect_root_method()
+    if method == "NONE":
+        log(f"ADB command aborted: no usable root method — {command!r}")
+        return None
     try:
-        cmd = [ADB_COMMAND, "-s", CURRENT_DEVICE, "shell", "su", "-c", command]
-        code, output = run_tracked_subprocess(cmd, timeout=60)
+        code, output = _run_adb_shell(command, method)
         if code != 0:
             log(f"ADB command failed: {command!r} — code {code}, output: {output.decode('utf-8', errors='replace')}")
             return None
@@ -352,6 +618,65 @@ def _device_temp_folder(name: str) -> str:
     return f"/sdcard/Download/{name}"
 
 
+def write_acquisition_metadata(extraction_dir: str, packages: list[str] | None = None) -> None:
+    """Record device and package details alongside the acquired evidence."""
+    def shell(command: str) -> str:
+        try:
+            code, output = _run_adb_shell(command)
+            return output.decode("utf-8", errors="replace").strip() if code == 0 else ""
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return ""
+
+    package_details = {}
+    for package in packages or []:
+        details = shell(f"dumpsys package {shlex.quote(package)}")
+        version = next(
+            (line.split("=", 1)[1].strip() for line in details.splitlines()
+             if "versionName=" in line),
+            "",
+        )
+        package_details[package] = {"version_name": version}
+
+    metadata = {
+        "acquired_at": datetime.now().isoformat(timespec="seconds"),
+        "device_serial": CURRENT_DEVICE,
+        "root_method": _detect_root_method(),
+        "device": {
+            "brand": shell("getprop ro.product.brand"),
+            "model": shell("getprop ro.product.model"),
+            "android_version": shell("getprop ro.build.version.release"),
+            "build_fingerprint": shell("getprop ro.build.fingerprint"),
+        },
+        "packages": package_details,
+    }
+    with open(os.path.join(extraction_dir, "acquisition_metadata.json"), "w", encoding="utf-8") as file:
+        json.dump(metadata, file, indent=2)
+    log(f"Acquisition metadata created in {extraction_dir}")
+
+
+def write_device_sha256_manifest(
+    paths: list[str], extraction_dir: str, require_root: bool = True
+) -> None:
+    """Save SHA-256 hashes calculated on the device before evidence transfer."""
+    if not paths:
+        return
+    quoted_paths = " ".join(shlex.quote(path) for path in paths)
+    remote_command = (
+        f"find {quoted_paths} -type f -exec sha256sum {{}} + 2>/dev/null"
+    )
+    adb_command = (
+        _root_exec_out_command(remote_command)
+        if require_root else _adb_exec_out_command(remote_command)
+    )
+    if not adb_command:
+        return
+
+    manifest = os.path.join(extraction_dir, "device_sha256.txt")
+    shell_local(f"{adb_command} > {shlex.quote(manifest)}")
+    if os.path.exists(manifest):
+        log(f"Device-side SHA-256 manifest created in {extraction_dir}")
+
+
 def _pull_folder(remote: str, local_base: str | None) -> str:
     """Pull remote folder to local_base (or user home folder). Returns the local destination."""
     dest = local_base if local_base else os.path.expanduser("~")
@@ -380,6 +705,8 @@ def find_files_on_device(query: str) -> list[str]:
     cmd = f"find /data /sdcard -name '*{query}*' 2>/dev/null"
     log(f"Searching for files matching '{query}': {cmd}")
     result = adb_shell_su(cmd)
+    if not result:
+        result = adb_shell(f"find /sdcard -name '*{query}*' 2>/dev/null")
     if result:
         return sorted(line.strip() for line in result.split("\n") if line.strip())
     return []
@@ -398,16 +725,27 @@ def extract_files_from_device(selected: list[str], output_path: str | None) -> s
     local_dir = os.path.join(base, folder_name)
     os.makedirs(local_dir, exist_ok=True)
 
-    local_archive = os.path.join(local_dir, "search_extract.tar")
-    adb_cmd = f"{shlex.quote(ADB_COMMAND)} -s {shlex.quote(CURRENT_DEVICE)}" if CURRENT_DEVICE else shlex.quote(ADB_COMMAND)
+    if not has_root_access():
+        for remote_path in selected:
+            if not remote_path.startswith("/sdcard/") or not adb_pull(remote_path, local_dir):
+                log(f"Non-root extraction skipped inaccessible path: {remote_path}")
+        write_acquisition_metadata(local_dir)
+        write_hash_manifests(local_dir)
+        log(f"Non-root public file extraction complete -> {local_dir}")
+        return local_dir
 
+    local_archive = os.path.join(local_dir, "search_extract.tar")
     # Quote each path to handle spaces or special characters safely
     quoted_paths = " ".join(shlex.quote(p) for p in selected)
 
     # Stream the tar archive directly from the phone to the PC using su for root access
     remote_command = f"stty raw 2>/dev/null; tar -cf - {quoted_paths} 2>/dev/null"
-    cmd = f"{adb_cmd} exec-out su -c {shlex.quote(remote_command)} > {shlex.quote(local_archive)}"
+    adb_command = _root_exec_out_command(remote_command)
+    if not adb_command:
+        return None
+    cmd = f"{adb_command} > {shlex.quote(local_archive)}"
     log(f"Streaming searched files to local tar: {cmd}")
+    write_device_sha256_manifest(selected, local_dir)
     shell_local(cmd)
 
     if is_cancelled():
@@ -423,6 +761,7 @@ def extract_files_from_device(selected: list[str], output_path: str | None) -> s
     # Extract locally on the PC
     if os.path.exists(local_archive) and os.path.getsize(local_archive) > 0:
         log(f"Extracting local search tar: {local_archive}")
+        write_acquisition_metadata(local_dir)
         extract_cmd = f'tar -xf "{local_archive}" -C "{local_dir}"'
         shell_local(extract_cmd)
         try:
@@ -472,7 +811,23 @@ def list_apk_packages() -> tuple[list[str], dict[str, str]]:
         "find /data/app -maxdepth 3 -name base.apk 2>/dev/null | sed 's|/base.apk||g'"
     )
     if not result:
-        return [], {}
+        result = adb_shell("pm list packages -f")
+        if not result:
+            return [], {}
+        apk_dir_map = {}
+        labels = []
+        for line in result.splitlines():
+            if not line.startswith("package:") or "=" not in line:
+                continue
+            apk_path, package = line[8:].rsplit("=", 1)
+            display = package
+            count = 1
+            while display in apk_dir_map:
+                count += 1
+                display = f"{package} ({count})"
+            apk_dir_map[display] = f"APK:{apk_path}"
+            labels.append(display)
+        return sorted(labels), apk_dir_map
 
     apk_dir_map: dict[str, str] = {}
     labels: list[str] = []
@@ -506,6 +861,8 @@ def list_apk_packages() -> tuple[list[str], dict[str, str]]:
 def list_public_packages() -> list[str]:
     """Return sorted list of package names under /sdcard/Android/data/."""
     result = adb_shell_su("ls /sdcard/Android/data/")
+    if not result:
+        result = adb_shell("ls /sdcard/Android/data/")
     if result:
         return sorted(line for line in result.split("\n") if line.strip())
     return []
@@ -528,8 +885,7 @@ def extract_private_data(selected: list[str], output_path: str | None) -> str | 
     local_dir = os.path.join(base, folder_name)
     os.makedirs(local_dir, exist_ok=True)
 
-    adb_cmd = f"{shlex.quote(ADB_COMMAND)} -s {shlex.quote(CURRENT_DEVICE)}" if CURRENT_DEVICE else shlex.quote(ADB_COMMAND)
-
+    write_device_sha256_manifest([f"/data/data/{pkg}" for pkg in selected], local_dir)
     for pkg in selected:
         if is_cancelled():
             break
@@ -537,7 +893,10 @@ def extract_private_data(selected: list[str], output_path: str | None) -> str | 
         
         # Stream the tar archive directly from the phone to a local tar file on the PC
         remote_command = f"stty raw 2>/dev/null; tar -cf - {shlex.quote(f'/data/data/{pkg}')} 2>/dev/null"
-        cmd = f"{adb_cmd} exec-out su -c {shlex.quote(remote_command)} > {shlex.quote(local_archive)}"
+        adb_command = _root_exec_out_command(remote_command)
+        if not adb_command:
+            break
+        cmd = f"{adb_command} > {shlex.quote(local_archive)}"
         log(f"Streaming /data/data/{pkg} to local tar")
         shell_local(cmd)
 
@@ -564,6 +923,7 @@ def extract_private_data(selected: list[str], output_path: str | None) -> str | 
         log("Private extraction cancelled: cleaned up local files.")
         return None
 
+    write_acquisition_metadata(local_dir, selected)
     write_hash_manifests(local_dir)
     log(f"Private extraction complete → {local_dir}")
     return local_dir
@@ -587,9 +947,23 @@ def extract_apk_files(
     local_base = os.path.join(base, folder_name)
     os.makedirs(local_base, exist_ok=True)
 
-    adb_cmd = f"{shlex.quote(ADB_COMMAND)} -s {shlex.quote(CURRENT_DEVICE)}" if CURRENT_DEVICE else shlex.quote(ADB_COMMAND)
+    if not has_root_access():
+        extracted = []
+        for package in selected:
+            apk_path = apk_dir_map.get(package, "")
+            if not apk_path.startswith("APK:"):
+                continue
+            package_dir = os.path.join(local_base, package)
+            os.makedirs(package_dir, exist_ok=True)
+            if adb_pull(apk_path[4:], package_dir):
+                extracted.append(package)
+        write_acquisition_metadata(local_base, [pkg.rsplit(" (", 1)[0] for pkg in extracted])
+        write_hash_manifests(local_base)
+        log(f"Non-root APK extraction complete → {local_base}")
+        return local_base, extracted
 
     extracted = []
+    write_device_sha256_manifest(list(apk_dir_map[pkg] for pkg in selected if pkg in apk_dir_map), local_base)
     for pkg in selected:
         if is_cancelled():
             break
@@ -604,7 +978,10 @@ def extract_apk_files(
 
         # Stream the tar archive of the APK directory directly from the phone to the PC
         remote_command = f"stty raw 2>/dev/null; tar -cf - -C {shlex.quote(pkg_dir)} . 2>/dev/null"
-        cmd = f"{adb_cmd} exec-out su -c {shlex.quote(remote_command)} > {shlex.quote(local_archive)}"
+        adb_command = _root_exec_out_command(remote_command)
+        if not adb_command:
+            break
+        cmd = f"{adb_command} > {shlex.quote(local_archive)}"
         log(f"Streaming APK directory for {pkg} to local tar")
         shell_local(cmd)
 
@@ -632,6 +1009,7 @@ def extract_apk_files(
         log("APK extraction cancelled by user: output cleaned up.")
         return local_base, []
 
+    write_acquisition_metadata(local_base, [pkg.rsplit(" (", 1)[0] for pkg in extracted])
     write_hash_manifests(local_base)
     log(f"APK extraction complete → {local_base}")
     return local_base, extracted
@@ -654,8 +1032,15 @@ def extract_public_data(selected: list[str], output_path: str | None) -> str | N
     local_dir = os.path.join(base, folder_name)
     os.makedirs(local_dir, exist_ok=True)
 
-    adb_cmd = f"{shlex.quote(ADB_COMMAND)} -s {shlex.quote(CURRENT_DEVICE)}" if CURRENT_DEVICE else shlex.quote(ADB_COMMAND)
+    if not has_root_access():
+        for package in selected:
+            adb_pull(f"/sdcard/Android/data/{package}", local_dir)
+        write_acquisition_metadata(local_dir, selected)
+        write_hash_manifests(local_dir)
+        log(f"Non-root public extraction complete → {local_dir}")
+        return local_dir
 
+    write_device_sha256_manifest([f"/sdcard/Android/data/{pkg}" for pkg in selected], local_dir)
     for pkg in selected:
         if is_cancelled():
             break
@@ -663,7 +1048,10 @@ def extract_public_data(selected: list[str], output_path: str | None) -> str | N
         
         # Stream the tar archive directly from the phone to the PC
         remote_command = f"stty raw 2>/dev/null; tar -cf - {shlex.quote(f'/sdcard/Android/data/{pkg}')} 2>/dev/null"
-        cmd = f"{adb_cmd} exec-out su -c {shlex.quote(remote_command)} > {shlex.quote(local_archive)}"
+        adb_command = _root_exec_out_command(remote_command)
+        if not adb_command:
+            break
+        cmd = f"{adb_command} > {shlex.quote(local_archive)}"
         log(f"Streaming /sdcard/Android/data/{pkg} to local tar")
         shell_local(cmd)
 
@@ -690,6 +1078,7 @@ def extract_public_data(selected: list[str], output_path: str | None) -> str | N
         log("Public extraction cancelled: cleaned up local files.")
         return None
 
+    write_acquisition_metadata(local_dir, selected)
     write_hash_manifests(local_dir)
     log(f"Public extraction complete → {local_dir}")
     return local_dir
@@ -706,11 +1095,27 @@ def full_device_dump(output_path: str | None) -> str | None:
     os.makedirs(local_dir, exist_ok=True)
     local_file = os.path.join(local_dir, f"{folder_name}.tar")
 
-    adb_cmd = f"{shlex.quote(ADB_COMMAND)} -s {shlex.quote(CURRENT_DEVICE)}" if CURRENT_DEVICE else shlex.quote(ADB_COMMAND)
-    # Command matching user's exact specification
-    remote_command = "stty raw 2>/dev/null; tar -cf - /data /sdcard 2>/dev/null"
-    cmd = f"{adb_cmd} exec-out su -c {shlex.quote(remote_command)} > {shlex.quote(local_file)}"
-    log(f"Starting full system dump: {cmd}")
+    rooted = has_root_access()
+    if rooted:
+        dump_paths = ["/data", "/sdcard", "/data_mirror"]
+        write_device_sha256_manifest(dump_paths, local_dir)
+        remote_command = (
+            "stty raw 2>/dev/null; paths='/data /sdcard'; "
+            "[ -d /data_mirror ] && paths=\"$paths /data_mirror\"; tar -cf - $paths 2>/dev/null"
+        )
+        adb_command = _root_exec_out_command(remote_command)
+        dump_kind = "full system"
+    else:
+        # ADB shell can acquire shared storage but cannot lawfully read /data.
+        dump_paths = ["/sdcard"]
+        write_device_sha256_manifest(dump_paths, local_dir, require_root=False)
+        remote_command = "stty raw 2>/dev/null; tar -cf - /sdcard 2>/dev/null"
+        adb_command = _adb_exec_out_command(remote_command)
+        dump_kind = "accessible shared-storage"
+    if not adb_command:
+        return None
+    cmd = f"{adb_command} > {shlex.quote(local_file)}"
+    log(f"Starting {dump_kind} dump: {cmd}")
     shell_local(cmd)
 
     if is_cancelled():
@@ -724,6 +1129,7 @@ def full_device_dump(output_path: str | None) -> str | None:
         return None
 
     if os.path.exists(local_file) and os.path.getsize(local_file) > 0:
+        write_acquisition_metadata(local_dir)
         write_hash_manifests(local_dir)
         log(f"Full logical dump complete → {local_file}")
         return local_file

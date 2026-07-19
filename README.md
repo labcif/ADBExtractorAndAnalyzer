@@ -8,7 +8,8 @@ This Python program provides a comprehensive solution for extracting, analyzing,
 ---
 
 ## Features
-- **Data Extraction:** Extracts public, private, and APK data from Android devices using ADB shell commands.
+- **Data Extraction:** All public, private, APK, search, and full-dump extractions are treated as forensic acquisitions and use ADB shell commands.
+- **Evidence Manifests:** Records device and package metadata plus device-side SHA-256 hashes before transfer.
 - **Data Analysis:** Utilizes ALEAPP, and MobSF for analyzing the extracted data.
 - **Decompilation:** Decompiles APK files using JADX to provide insights into their inner workings.
 - **User-Friendly Interface:** Offers a user-friendly interface for ease of use.
@@ -22,34 +23,44 @@ This Python program provides a comprehensive solution for extracting, analyzing,
 - ALEAPP (for forensic analysis)
 
 ## Android emulator root requirements
-The application uses `adb shell su -c` for its extraction commands. Therefore,
-an emulator being visible to ADB is not enough: it must provide a working
-`su` binary and grant superuser access to the ADB shell.
+The application detects and uses `adb root`, `su -c`, `su 0 -c`, or `su 0`
+for extraction commands. Therefore, an emulator being visible to ADB is not
+enough: it must provide one of these working root interfaces.
 
 Standard Android Studio images usually do not meet this requirement:
 
 - **Google Play images** use production-style builds and normally cannot be
   rooted with the standard AVD configuration.
 - **Google APIs images** may support `adb root` on some system-image builds,
-  but `adb root` alone does not satisfy this application unless `su -c` also
-  works. A root-enabled image or a properly configured root solution is still
-  required.
+and can therefore be acquired directly. A root-enabled image or a properly
+configured root solution is still required for production-style builds.
 
 Without root, the application may connect to the emulator and list the device,
-but private data, APK data, and full-device extraction will fail. Public data
-access is also limited by Android's storage restrictions.
+but private data extraction is unavailable. Full Dump automatically becomes an
+accessible logical acquisition of readable shared storage (`/sdcard`); Android
+storage restrictions still limit which public files are available.
 
 For a practical emulator setup, use a root-enabled AOSP or compatible Google
 APIs image and an emulator-compatible version of [Magisk](https://github.com/topjohnwu/Magisk).
 After installing and configuring Magisk, allow superuser access for ADB and
-verify the required interface before running the application:
+verify a root interface before running the application:
 
 ```bash
 adb shell su -c id
 ```
 
-The command should report `uid=0`. Do not rely on a Google Play image or on
-`adb root` alone; the application specifically requires `su -c`.
+The command should report `uid=0`. For userdebug builds, `adb root` followed
+by `adb shell id` is also supported.
+
+### Rooting an Android Studio AVD
+When a selected emulator has no root interface, the application offers a guided
+RootAVD launcher. Download RootAVD separately from
+https://gitlab.com/newbit/rootAVD, then select its `rootAVD.sh` script and the
+application resolves the AVD system-image `ramdisk.img` (or
+`ramdisk-qemu.img`) from the selected emulator's AVD configuration. RootAVD
+opens in a terminal because its Magisk selection is interactive. Back up the
+AVD system image, complete the terminal workflow, restart the emulator, and
+select it again in the application.
 
 
 ## Dependencies

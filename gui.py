@@ -31,6 +31,10 @@ from core import (
     set_current_device,
     get_current_device,
     list_adb_devices,
+    is_android_virtual_device,
+    has_root_access,
+    find_selected_avd_ramdisk,
+    launch_rootavd,
     find_files_on_device,
     extract_files_from_device,
 )
@@ -976,13 +980,22 @@ class ADBExtractorApp(tk.Tk):
     # ------------------------------------------------------------------
 
     def _on_close(self) -> None:
-        save_prefs({
+        self._prefs.update({
             "aleapp_path":    self._aleapp_path_var.get(),
             "output_path":    self._output_var.get(),
             "jadx_path":      self._jadx_path_var.get(),
             "mobsf_endpoint": self._mobsf_var.get(),
         })
+        save_prefs(self._prefs)
         self.destroy()
+
+    def _offer_rootavd_for_unrooted_emulator(self, device: str) -> None:
+        def worker():
+            needs_rootavd = is_android_virtual_device() and not has_root_access()
+            if needs_rootavd and get_current_device() == device:
+                self.after(0, lambda: RootAVDDialog(self, device))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _prompt_device_selection_startup(self) -> None:
         devices = list_adb_devices()
@@ -993,6 +1006,7 @@ class ADBExtractorApp(tk.Tk):
             self._device_label.config(fg=COLORS["success"])
             log(f"Auto-selected sole device at startup: {device}")
             self._populate_all()
+            self._offer_rootavd_for_unrooted_emulator(device)
         else:
             dialog = DeviceSelectorDialog(self, is_startup=True)
             self.wait_window(dialog)
@@ -1009,6 +1023,8 @@ class ADBExtractorApp(tk.Tk):
                 log("No device selected at startup.")
                 
             self._populate_all()
+            if dialog.selected_device and dialog.selected_device != "None":
+                self._offer_rootavd_for_unrooted_emulator(dialog.selected_device)
 
     def _change_device_runtime(self) -> None:
         dialog = DeviceSelectorDialog(self, is_startup=False)
@@ -1026,6 +1042,8 @@ class ADBExtractorApp(tk.Tk):
                 self._device_label.config(fg=COLORS["success"])
                 log(f"Device changed at runtime to: {dialog.selected_device}")
             self._populate_all()
+            if dialog.selected_device != "None":
+                self._offer_rootavd_for_unrooted_emulator(dialog.selected_device)
 
 
 # ---------------------------------------------------------------------------
@@ -1170,6 +1188,80 @@ class DeviceSelectorDialog(tk.Toplevel):
 
     def _on_disconnect(self) -> None:
         self.selected_device = "None"
+        self.destroy()
+
+
+class RootAVDDialog(tk.Toplevel):
+    """Guided RootAVD launcher for a selected, non-rooted Android emulator."""
+    def __init__(self, parent, device: str):
+        super().__init__(parent, bg=COLORS["bg"])
+        self.title("Root Android Virtual Device")
+        self.geometry("650x285")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        self.parent = parent
+        self.device = device
+        self._rootavd_var = tk.StringVar(value=parent._prefs.get("rootavd_path", ""))
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        body = tk.Frame(self, bg=COLORS["bg"], padx=20, pady=18)
+        body.pack(fill=tk.BOTH, expand=True)
+        tk.Label(body, text="ROOTAVD SETUP", bg=COLORS["bg"], fg=COLORS["highlight"],
+                 font=FONTS["section"]).pack(anchor="w")
+        tk.Label(
+            body,
+            text=(f"{self.device} is an emulator without root access. RootAVD patches the "
+                  "AVD ramdisk and opens an interactive terminal. The ramdisk is resolved "
+                  "from this AVD's configuration. Back up the AVD first; restart it after "
+                  "RootAVD finishes."),
+            bg=COLORS["bg"], fg=COLORS["text"], font=FONTS["label"],
+            justify=tk.LEFT, wraplength=600,
+        ).pack(anchor="w", pady=(8, 16))
+        self._build_path_row(body, "RootAVD script:", self._rootavd_var, self._browse_rootavd)
+
+        footer = tk.Frame(body, bg=COLORS["bg"])
+        footer.pack(fill=tk.X, pady=(18, 0))
+        skip_btn = tk.Button(footer, text="Skip", command=self.destroy)
+        _style_button(skip_btn)
+        skip_btn.pack(side=tk.RIGHT)
+        launch_btn = tk.Button(footer, text="Launch RootAVD", command=self._launch)
+        _style_button(launch_btn)
+        launch_btn.pack(side=tk.RIGHT, padx=(0, 8))
+
+    def _build_path_row(self, parent, label: str, variable: tk.StringVar, browse_cmd) -> None:
+        row = tk.Frame(parent, bg=COLORS["bg"])
+        row.pack(fill=tk.X, pady=4)
+        tk.Label(row, text=label, width=18, anchor="w", bg=COLORS["bg"],
+                 fg=COLORS["text_dim"], font=FONTS["label"]).pack(side=tk.LEFT)
+        entry = tk.Entry(row, textvariable=variable)
+        _style_entry(entry)
+        entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        button = tk.Button(row, text="Browse...", command=browse_cmd)
+        _style_button(button)
+        button.pack(side=tk.RIGHT)
+
+    def _browse_rootavd(self) -> None:
+        path = ask_custom_openfilename(self, title="Select rootAVD.sh")
+        if path:
+            self._rootavd_var.set(path)
+
+    def _launch(self) -> None:
+        rootavd_path = self._rootavd_var.get().strip()
+        if not rootavd_path:
+            show_custom_warning("RootAVD setup", "Select the RootAVD script.", parent=self)
+            return
+        ramdisk_path = find_selected_avd_ramdisk()
+        if not ramdisk_path:
+            show_custom_error("RootAVD setup", "Could not resolve this AVD's ramdisk image. Check the Android SDK and AVD configuration, then retry.", parent=self)
+            return
+        if not launch_rootavd(rootavd_path, ramdisk_path):
+            show_custom_error("RootAVD failed", "Could not launch RootAVD. Check logs.txt for details.", parent=self)
+            return
+        self.parent._prefs["rootavd_path"] = rootavd_path
+        save_prefs(self.parent._prefs)
+        show_custom_info("RootAVD started", "Complete RootAVD in the terminal, restart the emulator, then select it again.", parent=self)
         self.destroy()
 
 
